@@ -213,7 +213,7 @@
 	}
 
 	// Register the plugin
-	BBPlugin.register("system_autoload", {
+	BBPlugin.register("system_template_file_loader", {
 		title: "System Template File Loader",
 		author: "Shapescape",
 		icon: "fas.fa-truck-ramp-box",
