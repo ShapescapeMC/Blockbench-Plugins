@@ -4,13 +4,8 @@
 ## Steps
 
 ### 1. Install the plugin 
-There are two methods that can be used to install the file. We recommend installing via the URL as this is more convenient. 
-
-#### Via URL
-TODO
 
 #### From a file
-
 
 1. Clone this repository.
 2. Open Blockbench.
