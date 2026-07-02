@@ -25,53 +25,48 @@
 		const animationFiles = [];
 		const pngFiles = [];
 
-		// Function to find the nearest _scope.json in the directory and its parent directories
-		function findScopeFile(dir) {
-			const scopeFilePath = path.join(dir, "_scope.json");
-			if (fs.existsSync(scopeFilePath)) {
+		// Find the nearest system/module root in the directory and its parent
+		// directories: system_template systems are marked by _scope.json,
+		// ModularMC modules by _map.ts. Shared asset folders (_shared for
+		// system_template, modular_mc/shared for ModularMC) count as roots too.
+		function findSystemRoot(dir) {
+			if (
+				fs.existsSync(path.join(dir, "_scope.json")) ||
+				fs.existsSync(path.join(dir, "_map.ts")) ||
+				path.basename(dir) == "_shared" ||
+				(path.basename(dir) == "shared" &&
+					path.basename(path.dirname(dir)) == "modular_mc")
+			) {
 				return dir;
-			} else if (path.basename(dir) == "_shared") {
-				return dir;
-			} else {
-				const parentDir = path.dirname(dir);
-
-				if (parentDir !== dir) {
-					return findScopeFile(parentDir);
-				} else {
-					// Reached the root directory without finding _scope.json
-					return null;
-				}
 			}
+			const parentDir = path.dirname(dir);
+			return parentDir !== dir ? findSystemRoot(parentDir) : null;
 		}
 
-		// Find the directory with _scope.json
-		const startDir = findScopeFile(directoryPath);
+		const startDir = findSystemRoot(directoryPath);
 
 		if (startDir) {
-			if (path.basename(startDir) != "_shared") {
-				// Start scanning from the directory with _scope.json
-				scanFilesInDirAndChildren(startDir);
-				if (path.dirname(startDir) != "system_template") {
-					fs.access(
-						path.join(path.dirname(startDir) + "/_shared"),
-						fs.constants.F_OK,
-						(err) => {
-							if (err) {
-								console.log("[SYSTEM AUTOLOAD] System has no _shared folder.");
-								return;
-							}
+			scanFilesInDirAndChildren(startDir);
 
-							scanFilesInDirAndChildren();
-						},
-					);
+			// Also scan the toolchain's shared assets folder, if any:
+			// system_template keeps it in a _shared folder next to the system,
+			// ModularMC in a shared folder directly under modular_mc.
+			const sharedDirs = [path.join(path.dirname(startDir), "_shared")];
+			for (let dir = startDir; path.dirname(dir) !== dir; ) {
+				dir = path.dirname(dir);
+				if (path.basename(dir) == "modular_mc") {
+					sharedDirs.push(path.join(dir, "shared"));
+					break;
 				}
-			} else {
-				// Start scanning from the directory with _scope.json
-				scanFilesInDirAndChildren(startDir);
+			}
+			for (const sharedDir of sharedDirs) {
+				if (sharedDir !== startDir && fs.existsSync(sharedDir)) {
+					scanFilesInDirAndChildren(sharedDir);
+				}
 			}
 		} else {
 			console.log(
-				"File is not in a _shared folder and the _scope.json file was not found in the current or parent directories.",
+				"[SYSTEM AUTOLOAD] No _scope.json (system_template) or _map.ts (ModularMC) found in the current or parent directories.",
 			);
 		}
 
@@ -227,8 +222,8 @@
 		author: "Shapescape",
 		icon: "fas.fa-truck-ramp-box",
 		description:
-			"Adding a button which loads animation and png files from same directory/subdirectories of the loaded geometry file.",
-		version: "3.1.0",
+			"Adding a button which loads animation and png files from same directory/subdirectories of the loaded geometry file. Works with system_template and ModularMC projects.",
+		version: "3.2.0",
 		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {
