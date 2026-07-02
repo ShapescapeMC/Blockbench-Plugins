@@ -6,7 +6,7 @@
 			this.width;
 			this.height;
 
-			this.home = require("os").homedir();
+			this.home = SystemInfo.home_directory;
 			this.path_config_folder = this.home + "//.batch";
 			console.log(this.path_config_folder);
 			this.path_jobs_folder = this.path_config_folder + "//jobs";
@@ -259,7 +259,17 @@
 	}
 
 	const path = require("path");
-	const fs = require("fs");
+	// Blockbench 5: fs requires user permission, requested on demand
+	let fs;
+
+	function ensureFsAccess() {
+		fs ??= requireNativeModule("fs", {
+			message:
+				"Required to read and write batch screenshot jobs, config and exported images.",
+		});
+		if (fs && !config) setupDefaultConfig();
+		return !!fs;
+	}
 
 	// defaults
 	var config;
@@ -626,17 +636,17 @@
 		description:
 			"Creates screenshots of a batch of models based on a set of rules.",
 		icon: "camera_enhance",
-		version: "1.0.0",
+		version: "1.1.0",
+		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {
-			setupDefaultConfig();
-
 			batch_config_action = new Action({
 				id: "batch_screenshot_config",
 				name: "Batch: config",
 				icon: "settings",
 				category: "filter",
 				click: function (ev) {
+					if (!ensureFsAccess()) return;
 					loadConfigDialog().show();
 				},
 			});
@@ -647,6 +657,7 @@
 				icon: "add",
 				category: "filter",
 				click: function (ev) {
+					if (!ensureFsAccess()) return;
 					loadRegisterJobDialog().show();
 				},
 			});
@@ -657,6 +668,7 @@
 				icon: "bar_chart",
 				category: "filter",
 				click: function (ev) {
+					if (!ensureFsAccess()) return;
 					loadRunJobsDialog().show();
 				},
 			});
@@ -667,6 +679,7 @@
 				icon: "add",
 				category: "filter",
 				click: function (ev) {
+					if (!ensureFsAccess()) return;
 					loadSimpleMassRegisterDialog().show();
 				},
 			});

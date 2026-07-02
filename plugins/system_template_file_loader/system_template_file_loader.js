@@ -1,10 +1,19 @@
 //import * as blockbenchTypes from "blockbench-types";
 (function () {
-	var import_button;
+	var import_button_0, import_button_1;
 
 	// Import required modules
 	const path = require("path");
-	const fs = require("fs");
+	// Blockbench 5: fs requires user permission, requested on demand
+	let fs;
+
+	function ensureFsAccess() {
+		fs ??= requireNativeModule("fs", {
+			message:
+				"Required to scan the project directory for textures and animations to import.",
+		});
+		return !!fs;
+	}
 
 	// Get the directory path of the current project
 	function getDirectoryPath() {
@@ -219,15 +228,17 @@
 		icon: "fas.fa-truck-ramp-box",
 		description:
 			"Adding a button which loads animation and png files from same directory/subdirectories of the loaded geometry file.",
-		version: "3.0.0",
+		version: "3.1.0",
+		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {
-			import_button_1 = new Action("load_all_from_system", {
+			import_button_1 = new Action("load_relevant_from_system", {
 				name: "Load Relevant Files From System",
 				description:
 					"Loads animations and textures that have the file ending .block.png and .block.tga if the model is a block and .entity.png and .entity.tga if the model is an entity from directory and subdirectories into the project.",
 				icon: "fas.fa-paste",
 				click: function () {
+					if (!ensureFsAccess()) return;
 					importRelevantFiles();
 				},
 			});
@@ -242,6 +253,7 @@
 					"Loads animations and all textures from directory and subdirectories into the project.",
 				icon: "fas.fa-paste",
 				click: function () {
+					if (!ensureFsAccess()) return;
 					importAllFiles();
 				},
 			});
