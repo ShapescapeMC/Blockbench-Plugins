@@ -5,10 +5,10 @@
 This repository hosts a set of custom plugins for the open-source 3D modelling software Blockbench.
 
 ## 🧑‍🏫 About
-### Batch Screenshot
-This plugin automates the screenshot process of models programmatically with configurable settings. 
+### Render Model
+This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass.
 
-[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/batch_screenshot/about.html)
+[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
 ### System Template File Loader
 This plugin allows for easy importing of PNG and animation files into a project when the geometry file is located in the same directory as the other files. For example, when using a custom folder structure in the Regolith filter system template. It can currently read files from the same directory or from subdirectories.
