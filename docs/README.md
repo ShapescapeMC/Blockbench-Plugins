@@ -34,7 +34,7 @@ We're using the `myst-parser` to enable the markdown syntax in the documentation
 Table of contents is defined in the `index.md` file. It is pretty simple to understand. You can read the `docs/index.md` file to learn by example.
 
 ### Labels and References
-Sphinx lets you define a name for a sectin of the documentation that you can use to create a hyperlink to that section in othe parts of the documentation. Linking pages like that is safer than linking them by their path because if the path changes, the link will still work.
+Sphinx lets you define a name for a section of the documentation that you can use to create a hyperlink to that section in other parts of the documentation. Linking pages like that is safer than linking them by their path because if the path changes, the link will still work.
 
 To define a label for a section, you can use the following syntax:
 ```markdown

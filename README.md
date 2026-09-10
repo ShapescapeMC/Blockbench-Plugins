@@ -6,7 +6,7 @@ This repository hosts a set of custom plugins for the open-source 3D modelling s
 
 ## 🧑‍🏫 About
 ### Render Model
-This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass.
+This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass. Animations can be layered, so an idle or a blink plays over a walk cycle, and every run writes into its own folder.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
@@ -16,9 +16,9 @@ This plugin allows for easy importing of PNG and animation files into a project 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/system_template_file_loader/about.html)
 
 ## 📒 Documentation
-Documentation for the filter is available here: https://blockbench-plugins.readthedocs.io/en/latest/
+Documentation is available here: https://blockbench-plugins.readthedocs.io/en/latest/
 
-You can find the documenation for all filters and tools on our organisation page https://github.com/ShapescapeMC.
+You can find the documentation for all of our filters and tools on our organisation page https://github.com/ShapescapeMC.
 
 ## 👷 Contributing
 We welcome contributions from the community! If you'd like to contribute to this project, please read our [contribute file](https://github.com/ShapescapeMC/Blockbench-Plugins/blob/main/CONTRIBUTING.md) for guidelines on how to get started.
