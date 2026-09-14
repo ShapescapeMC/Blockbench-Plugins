@@ -53,10 +53,12 @@ One full spin around the model, looping.
 
 One looping GIF per animation, each as long as the animation itself. Frames come from stepping the timeline rather than recording playback, so the timing is exact.
 
+Only animations loaded into the open project can be rendered. If the model's animation file has not been imported, this section says so instead of showing any options. Import the file in Blockbench, or load it with the System Template File Loader, and open the dialog again.
+
 - `Render these`: the base animations. You get one GIF for each, named after it.
 - `Render all` / `Render none`: ticks or clears the list above.
 - `Layer on top`: animations that play at the same time as every base animation. Idle, blinking, a breathing loop. These never get a GIF of their own.
-- `Export as`: `One GIF each` gives a file for each base with the overlays on top. `One GIF, all layered` collapses bases and overlays into a single file. `One sheet` puts every base animation side by side in a single GIF, each named above, and `GIFs and a sheet` writes both.
+- `Export as`: `Separate GIFs` gives a file for each base with the overlays on top. `One GIF, played together` plays the bases and overlays at the same time on the one model, in a single file. `One sheet, side by side` puts every base animation next to each other in a single GIF, each named above, and `Separate GIFs and a sheet` writes both. A sentence under the dropdown describes exactly what the current choice will make, using the animations you ticked.
 - `Smoothness`: frames per second for these GIFs, set separately from the turntable.
 - `Camera angle`: a fixed camera for all of them.
 
@@ -66,7 +68,7 @@ For example, ticking `swim` and `swim_left` under Render these, with `idle` and 
 
 The sheet uses the most compact grid for the number of animations: up to three in a row, four as two over two, then close to square, with a short last row centred. Overlays play in every tile.
 
-The sheet runs as long as its longest animation, and shorter ones loop inside it. A short animation can jump back to its start when the GIF restarts. Choosing `GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
+The sheet runs as long as its longest animation, and shorter ones loop inside it. A short animation can jump back to its start when the GIF restarts. Choosing `Separate GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
 
 ## Image size
 

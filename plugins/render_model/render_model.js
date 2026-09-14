@@ -280,10 +280,16 @@
 		return selectedAnimations(form.anim_overlay);
 	}
 
+	// The checkbox keeps its saved value even when a project has no animations
+	// and the checkbox is hidden, so its value alone cannot gate anything.
+	function animationsEnabled(form) {
+		return dialog_animations.length > 0 && !!form.animations;
+	}
+
 	// Each group is one output: the first entry is the base animation and the
 	// rest play on top of it, the way Blockbench stacks them in the viewport.
 	function animationGroups(form) {
-		if (!form.animations) return [];
+		if (!animationsEnabled(form)) return [];
 		const mains = selectedAnimations(form.anim_main);
 		const overlays = overlayAnimations(form);
 
@@ -1288,7 +1294,7 @@
 		const still_sheets = sheetable ? stillSheetLayouts(form).length : 0;
 		const gif_frames = gifFrameCount(form);
 		const groups = animationGroups(form);
-		const overlays = form.animations ? overlayAnimations(form).length : 0;
+		const overlays = animationsEnabled(form) ? overlayAnimations(form).length : 0;
 		const anim_gifs = animationsToGifs(form) ? groups.length : 0;
 		const anim_sheet = animationsToSheet(form) && groups.length > 0;
 		const per_size =
@@ -1395,19 +1401,93 @@
 		return text;
 	}
 
-	// The summary line is rebuilt on every form change. Reaching into the form
-	// element is the only way to rewrite its text, so failures are ignored.
-	function updateSummary(dialog, form) {
-		try {
-			const element = dialog.form.form_data.summary;
-			const node = element.bar.querySelector(".small_text");
-			if (!node) return;
-			const text = describeRun(form);
-			node.innerHTML =
-				typeof pureMarked === "function" ? pureMarked(text) : text;
-		} catch (err) {
-			// The dialog still works without a live summary.
+	function joinNames(names) {
+		if (names.length <= 1) return names.join("");
+		return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+	}
+
+	function shortList(names) {
+		if (names.length <= 3) return joinNames(names);
+		return names.slice(0, 2).join(", ") + " and " + (names.length - 2) + " more";
+	}
+
+	// Spells out what the animation Export as choice will write, using the
+	// animations actually ticked, so nobody has to guess what the options mean.
+	function describeAnimationExport(form) {
+		const mains = selectedAnimations(form.anim_main).map((a) => safeName(a.name));
+		const overlays = overlayAnimations(form).map((a) => safeName(a.name));
+
+		if (!mains.length && !overlays.length) {
+			return "Tick at least one animation under Render these.";
 		}
+		if (!mains.length) {
+			return (
+				"Nothing is ticked under Render these, so " +
+				joinNames(overlays) +
+				" play together in one GIF."
+			);
+		}
+
+		const count = mains.length;
+		const on_top = overlays.length
+			? ", with " + shortList(overlays) + " playing on top"
+			: "";
+
+		switch (form.anim_export) {
+			case "layered": {
+				const all = dedupeAnimations(
+					selectedAnimations(form.anim_main).concat(overlayAnimations(form)),
+				).map((a) => safeName(a.name));
+				return all.length === 1
+					? "Makes one GIF of " + all[0] + "."
+					: "Makes one GIF where " +
+							shortList(all) +
+							" all play at the same time on the one model.";
+			}
+			case "sheet":
+				return count === 1
+					? "Makes one GIF with " + mains[0] + " in a single tile, named above" + on_top + "."
+					: "Makes one GIF with " +
+							shortList(mains) +
+							" side by side, each named above" +
+							(overlays.length ? on_top + " of each" : "") +
+							".";
+			case "both":
+				return (
+					"Makes " +
+					(count === 1 ? "a GIF of " + mains[0] : "a separate GIF for each of " + shortList(mains)) +
+					on_top +
+					", plus one GIF with " +
+					(count === 1 ? "it in a named tile." : "them side by side, each named above.")
+				);
+			case "separate":
+			default:
+				return count === 1
+					? "Makes one GIF of " + mains[0] + on_top + "."
+					: "Makes " +
+							count +
+							" GIFs, one for each of " +
+							shortList(mains) +
+							on_top +
+							".";
+		}
+	}
+
+	// Info lines are built once, so the only way to change their text later is
+	// to reach into the element. Failures are ignored: the dialog still works.
+	function setInfoText(dialog, key, text) {
+		try {
+			const node = dialog.form.form_data[key].bar.querySelector(".small_text");
+			if (!node) return;
+			node.innerHTML = typeof pureMarked === "function" ? pureMarked(text) : text;
+		} catch (err) {
+			// No live text for this line.
+		}
+	}
+
+	function updateSummary(dialog, form) {
+		setInfoText(dialog, "summary", describeRun(form));
+		setInfoText(dialog, "anim_export_explain", describeAnimationExport(form));
 	}
 
 	// Settings saved by an older version may name sizes that are no longer
@@ -1576,6 +1656,12 @@
 				full_width: true,
 				condition: () => dialog_animations.length > 0,
 			},
+			animations_empty: {
+				type: "info",
+				text: "**Animation GIFs.** This model has no animations loaded, so there is nothing to render here. Import its animation file in Blockbench, or load it with the System Template File Loader, then open this dialog again.",
+				full_width: true,
+				condition: () => dialog_animations.length === 0,
+			},
 			animations: {
 				type: "checkbox",
 				label: "Make animation GIFs",
@@ -1588,7 +1674,7 @@
 				value: all_animations_on,
 				options: animation_options,
 				full_width: true,
-				condition: (form) => form.animations,
+				condition: (form) => animationsEnabled(form),
 			},
 			anim_overlay: {
 				type: "inline_multi_select",
@@ -1596,33 +1682,39 @@
 				value: no_animations_on,
 				options: animation_options,
 				full_width: true,
-				condition: (form) => form.animations,
+				condition: (form) => animationsEnabled(form),
 			},
 			anim_export: {
 				type: "select",
 				label: "Export as",
 				value: storedAnimExport(stored),
 				options: {
-					separate: "One GIF each",
-					layered: "One GIF, all layered",
-					sheet: "One sheet",
-					both: "GIFs and a sheet",
+					separate: "Separate GIFs",
+					layered: "One GIF, played together",
+					sheet: "One sheet, side by side",
+					both: "Separate GIFs and a sheet",
 				},
-				condition: (form) => form.animations,
+				condition: (form) => animationsEnabled(form),
+			},
+			anim_export_explain: {
+				type: "info",
+				text: "",
+				full_width: true,
+				condition: (form) => animationsEnabled(form),
 			},
 			anim_smoothness: {
 				type: "select",
 				label: "Smoothness",
 				value: String(stored.anim_smoothness || 20),
 				options: SMOOTHNESS_OPTIONS,
-				condition: (form) => form.animations,
+				condition: (form) => animationsEnabled(form),
 			},
 			anim_angle: {
 				type: "select",
 				label: "Camera angle",
 				value: stored.anim_angle || "iso_front_right",
 				options: CAMERA_OPTIONS,
-				condition: (form) => form.animations,
+				condition: (form) => animationsEnabled(form),
 			},
 			_3: "_",
 			size_header: {
@@ -1662,7 +1754,7 @@
 				condition: (form) =>
 					(stillsToSheets(form) &&
 						(form.sides || form.top_bottom || form.isometric)) ||
-					(form.animations && animationsToSheet(form)),
+					(animationsEnabled(form) && animationsToSheet(form)),
 				description: "The view or animation name above each tile.",
 			},
 			shading: {
@@ -1738,7 +1830,7 @@
 				label: "",
 				buttons: ["Render all", "Render none"],
 				full_width: true,
-				condition: (data) => data.animations,
+				condition: (data) => animationsEnabled(data),
 				click(index) {
 					Dialog.open.setFormValues({
 						anim_main: index === 0 ? all_animations_on : no_animations_on,
