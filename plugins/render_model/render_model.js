@@ -133,32 +133,38 @@
 		const right = new THREE.Vector3().crossVectors(UP, forward).normalize();
 		const angles = [];
 
-		function add(name, vector) {
-			angles.push({ name, direction: vector.clone().normalize() });
+		// Only the fixed views have a place in a sheet. Turntable stills and the
+		// current view are always written as separate images.
+		function add(name, vector, sheetable) {
+			angles.push({
+				name,
+				direction: vector.clone().normalize(),
+				sheetable: !!sheetable,
+			});
 		}
 
 		if (form.sides) {
-			add("front", forward);
-			add("back", forward.clone().negate());
-			add("right", right);
-			add("left", right.clone().negate());
+			add("front", forward, true);
+			add("back", forward.clone().negate(), true);
+			add("right", right, true);
+			add("left", right.clone().negate(), true);
 		}
 		if (form.top_bottom) {
-			add("top", UP);
-			add("bottom", UP.clone().negate());
+			add("top", UP, true);
+			add("bottom", UP.clone().negate(), true);
 		}
 		if (form.isometric) {
-			add("iso_front_right", tilt(forward.clone().add(right), ISO_PITCH));
-			add("iso_front_left", tilt(forward.clone().sub(right), ISO_PITCH));
-			add("iso_back_right", tilt(forward.clone().negate().add(right), ISO_PITCH));
-			add("iso_back_left", tilt(forward.clone().negate().sub(right), ISO_PITCH));
+			add("iso_front_right", tilt(forward.clone().add(right), ISO_PITCH), true);
+			add("iso_front_left", tilt(forward.clone().sub(right), ISO_PITCH), true);
+			add("iso_back_right", tilt(forward.clone().negate().add(right), ISO_PITCH), true);
+			add("iso_back_left", tilt(forward.clone().negate().sub(right), ISO_PITCH), true);
 		}
 		if (form.turntable) {
 			const steps = clamp(Math.round(form.turntable), 2, 64);
 			const digits = String(steps - 1).length;
 			turntableDirections(steps, form.turntable_pitch ?? 30).forEach(
 				(direction, i) => {
-					add("turn_" + String(i).padStart(digits, "0"), direction);
+					add("turn_" + String(i).padStart(digits, "0"), direction, false);
 				},
 			);
 		}
@@ -166,6 +172,69 @@
 			angles.push({ name: "view", copy_viewport: true });
 		}
 		return angles;
+	}
+
+	const TILE_LABELS = {
+		front: "Front",
+		right: "Right",
+		back: "Back",
+		left: "Left",
+		top: "Top",
+		bottom: "Bottom",
+		iso_front_left: "Front left",
+		iso_front_right: "Front right",
+		iso_back_left: "Back left",
+		iso_back_right: "Back right",
+	};
+
+	function stillsToSheets(form) {
+		return form.stills_export === "sheets" || form.stills_export === "both";
+	}
+
+	// Rows read left to right, top to bottom. Four views always sit two over
+	// two, and the sides read as one rotation: front, right, back, left.
+	function stillSheetLayouts(form) {
+		if (!stillsToSheets(form)) return [];
+		const sheets = [];
+		if (form.sides && form.top_bottom && form.sheet_six === "combined") {
+			sheets.push({
+				name: "all_views",
+				label: "all views sheet",
+				rows: [
+					["front", "right", "top"],
+					["back", "left", "bottom"],
+				],
+			});
+		} else {
+			if (form.sides) {
+				sheets.push({
+					name: "sides",
+					label: "sides sheet",
+					rows: [
+						["front", "right"],
+						["back", "left"],
+					],
+				});
+			}
+			if (form.top_bottom) {
+				sheets.push({
+					name: "top_bottom",
+					label: "top and bottom sheet",
+					rows: [["top", "bottom"]],
+				});
+			}
+		}
+		if (form.isometric) {
+			sheets.push({
+				name: "isometric",
+				label: "isometric sheet",
+				rows: [
+					["iso_front_left", "iso_front_right"],
+					["iso_back_left", "iso_back_right"],
+				],
+			});
+		}
+		return sheets;
 	}
 
 	function directionByName(name) {
@@ -221,10 +290,19 @@
 		if (!mains.length) {
 			return overlays.length ? [overlays.slice()] : [];
 		}
-		if (form.anim_mode === "layered") {
+		if (form.anim_export === "layered") {
 			return [dedupeAnimations(mains.concat(overlays))];
 		}
 		return mains.map((main) => dedupeAnimations([main].concat(overlays)));
+	}
+
+	function animationsToGifs(form) {
+		const mode = form.anim_export || "separate";
+		return mode === "separate" || mode === "layered" || mode === "both";
+	}
+
+	function animationsToSheet(form) {
+		return form.anim_export === "sheet" || form.anim_export === "both";
 	}
 
 	function dedupeAnimations(list) {
@@ -586,6 +664,149 @@
 		return canvas;
 	}
 
+	// ----- sheets -----
+	const LABEL_BAND = "#e8ebee";
+	const LABEL_TEXT = "#1d2226";
+	const LABEL_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
+	// A browser canvas cannot be created past these, so a sheet this large would
+	// come out blank rather than slow. Everything below them is allowed.
+	const MAX_CANVAS_EDGE = 32767;
+	const MAX_CANVAS_AREA = 268435456;
+
+	// Most compact grid for a list: up to three in a row, then close to square.
+	function gridRows(items) {
+		if (!items.length) return [];
+		const cols =
+			items.length <= 3 ? items.length : Math.ceil(Math.sqrt(items.length));
+		const rows = [];
+		for (let i = 0; i < items.length; i += cols) {
+			rows.push(items.slice(i, i + cols));
+		}
+		return rows;
+	}
+
+	function sheetMetrics(size, labels) {
+		const gap = Math.max(2, Math.round(Math.min(size.width, size.height) * 0.02));
+		const label_height = labels
+			? Math.max(14, Math.round(size.height * 0.09))
+			: 0;
+		return {
+			gap,
+			label_height,
+			cell_height: label_height + size.height,
+		};
+	}
+
+	function sheetDimensions(rows, size, labels) {
+		const metrics = sheetMetrics(size, labels);
+		const cols = Math.max(...rows.map((row) => row.length));
+		return {
+			width: cols * size.width + (cols + 1) * metrics.gap,
+			height: rows.length * metrics.cell_height + (rows.length + 1) * metrics.gap,
+		};
+	}
+
+	function exceedsCanvas(dimensions) {
+		return (
+			dimensions.width > MAX_CANVAS_EDGE ||
+			dimensions.height > MAX_CANVAS_EDGE ||
+			dimensions.width * dimensions.height > MAX_CANVAS_AREA
+		);
+	}
+
+	function drawLabel(ctx, text, x, y, width, height) {
+		ctx.fillStyle = LABEL_BAND;
+		ctx.fillRect(x, y, width, height);
+
+		const max_width = width * 0.92;
+		let font_size = Math.round(height * 0.58);
+		ctx.font = "600 " + font_size + "px " + LABEL_FONT;
+		const measured = ctx.measureText(text).width;
+		if (measured > max_width) {
+			font_size = Math.max(8, Math.floor((font_size * max_width) / measured));
+			ctx.font = "600 " + font_size + "px " + LABEL_FONT;
+		}
+
+		// Still too wide at the smallest size: cut it and show that it was cut.
+		let shown = text;
+		if (ctx.measureText(shown).width > max_width) {
+			while (
+				shown.length > 1 &&
+				ctx.measureText(shown + "\u2026").width > max_width
+			) {
+				shown = shown.slice(0, -1);
+			}
+			shown += "\u2026";
+		}
+
+		ctx.fillStyle = LABEL_TEXT;
+		ctx.textAlign = "center";
+		ctx.textBaseline = "middle";
+		ctx.fillText(shown, x + width / 2, y + height / 2);
+	}
+
+	// rows: arrays of { label, canvas }, each canvas one tile at `size`. A row
+	// shorter than the widest one is centred under it.
+	function composeSheet(rows, size, options) {
+		const metrics = sheetMetrics(size, options.labels);
+		const dimensions = sheetDimensions(rows, size, options.labels);
+		const cols = Math.max(...rows.map((row) => row.length));
+
+		const canvas = document.createElement("canvas");
+		canvas.width = dimensions.width;
+		canvas.height = dimensions.height;
+		const ctx = canvas.getContext("2d");
+
+		if (options.background) {
+			ctx.fillStyle = options.background;
+			ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+		}
+
+		rows.forEach((row, r) => {
+			const offset = (cols - row.length) / 2;
+			row.forEach((cell, c) => {
+				const x = Math.round(
+					metrics.gap + (c + offset) * (size.width + metrics.gap),
+				);
+				const y = metrics.gap + r * (metrics.cell_height + metrics.gap);
+				if (metrics.label_height) {
+					drawLabel(ctx, cell.label, x, y, size.width, metrics.label_height);
+				}
+				ctx.drawImage(cell.canvas, x, y + metrics.label_height);
+			});
+		});
+		return canvas;
+	}
+
+	// Sheets planned for a run, with their pixel size at each output size.
+	function plannedSheets(form, sizes, group_count) {
+		const labels = form.sheet_labels !== false;
+		const planned = [];
+		stillSheetLayouts(form).forEach((layout) => {
+			sizes.forEach((size) => {
+				planned.push({
+					label: layout.label,
+					size,
+					dimensions: sheetDimensions(layout.rows, size, labels),
+					animated: false,
+				});
+			});
+		});
+		if (animationsToSheet(form) && group_count) {
+			const rows = gridRows(new Array(group_count).fill(0));
+			sizes.forEach((size) => {
+				planned.push({
+					label: "animation sheet",
+					size,
+					dimensions: sheetDimensions(rows, size, labels),
+					animated: true,
+				});
+			});
+		}
+		return planned;
+	}
+
 	// ----- gif -----
 	// Alpha at or above this counts as opaque. GIF transparency is one bit.
 	const ALPHA_CUTOFF = 128;
@@ -728,6 +949,26 @@
 			return;
 		}
 
+		const too_large = plannedSheets(form, sizes, anim_groups.length).find(
+			(sheet) => exceedsCanvas(sheet.dimensions),
+		);
+		if (too_large) {
+			Blockbench.notification(
+				"Model Render",
+				"The " +
+					too_large.label +
+					" would be " +
+					too_large.dimensions.width +
+					" by " +
+					too_large.dimensions.height +
+					" pixels at " +
+					too_large.size.label +
+					", which is more than Blockbench can draw. Pick a smaller size" +
+					(too_large.animated ? " or fewer animations." : "."),
+			);
+			return;
+		}
+
 		// Created last, so a run that fails a check leaves no empty folder behind.
 		const prefix = (form.prefix || Project.name || "model").trim();
 		const folder = makeRunFolder(parent_folder, safeName(prefix));
@@ -789,15 +1030,26 @@
 			frame_height: form.frame_height,
 			supersample: form.supersample,
 			background: colorToHex(form.background),
+			labels: form.sheet_labels !== false,
 		};
+
+		const still_sheets = stillSheetLayouts(form);
+		const separate_sheetable = form.stills_export !== "sheets";
+		const anim_gifs = animationsToGifs(form);
+		const anim_sheet = animationsToSheet(form) && anim_groups.length > 0;
 
 		const animation_frames = anim_groups.reduce(
 			(sum, group) => sum + groupFrameCount(group, anim_fps),
 			0,
 		);
+		const sheet_frames = anim_sheet
+			? Math.max(...anim_groups.map((group) => groupFrameCount(group, anim_fps)))
+			: 0;
 		const total =
 			sizes.length *
-			(stills.length + gif_directions.length + animation_frames);
+			(stills.length +
+				gif_directions.length +
+				(anim_sheet ? sheet_frames : animation_frames));
 		let done = 0;
 		const written = [];
 
@@ -823,15 +1075,58 @@
 			Blockbench.setStatusBarText("Rendering " + prefix);
 
 			for (const size of sizes) {
+				// Tiles are held only until every sheet that uses them is written,
+				// so at most six full-size views are in memory at once.
+				const tiles = {};
+				const pending = still_sheets.slice();
+
 				for (const angle of stills) {
 					const canvas = renderFrame(angle, size, options);
-					const file_name =
-						prefix + "_" + angle.name + suffix(size) + ".png";
-					writeBase64(
-						joinPath(folder, file_name),
-						canvas.toDataURL().split(";base64,").pop(),
-					);
-					written.push(file_name);
+
+					if (!angle.sheetable || separate_sheetable) {
+						const file_name =
+							prefix + "_" + angle.name + suffix(size) + ".png";
+						writeBase64(
+							joinPath(folder, file_name),
+							canvas.toDataURL().split(";base64,").pop(),
+						);
+						written.push(file_name);
+					}
+
+					if (angle.sheetable && pending.length) {
+						tiles[angle.name] = canvas;
+						for (let i = pending.length - 1; i >= 0; i--) {
+							const layout = pending[i];
+							const keys = layout.rows.flat();
+							if (!keys.every((key) => tiles[key])) continue;
+
+							const sheet = composeSheet(
+								layout.rows.map((row) =>
+									row.map((key) => ({
+										label: TILE_LABELS[key],
+										canvas: tiles[key],
+									})),
+								),
+								size,
+								options,
+							);
+							const file_name =
+								prefix + "_sheet_" + layout.name + suffix(size) + ".png";
+							writeBase64(
+								joinPath(folder, file_name),
+								sheet.toDataURL().split(";base64,").pop(),
+							);
+							written.push(file_name);
+
+							pending.splice(i, 1);
+							keys.forEach((key) => {
+								const still_needed = pending.some((other) =>
+									other.rows.flat().includes(key),
+								);
+								if (!still_needed) delete tiles[key];
+							});
+						}
+					}
 					await tick();
 				}
 
@@ -862,34 +1157,85 @@
 					written.push(file_name);
 				}
 
-				for (const group of anim_groups) {
-					const length = longestLength(group);
-					const count = groupFrameCount(group, anim_fps);
+				if (anim_sheet) {
 					const transparent = !options.background;
 					const delay = frameDelay(anim_fps);
-					const gif = startGif();
-					for (let i = 0; i < count; i++) {
-						poseAnimations(group, (i / anim_fps) % length);
+					const lengths = anim_groups.map((group) => longestLength(group));
+					const counts = anim_groups.map((group) =>
+						groupFrameCount(group, anim_fps),
+					);
+					const names = anim_groups.map((group) => safeName(group[0].name));
+					const group_gifs = anim_gifs ? anim_groups.map(() => startGif()) : null;
+					const sheet_gif = startGif();
+
+					// One pass renders every tile once per frame. The sheet runs as long as
+					// its longest animation and shorter ones loop inside it, while each
+					// animation's own GIF stops at its own length.
+					for (let i = 0; i < sheet_frames; i++) {
+						const cells = [];
+						anim_groups.forEach((group, g) => {
+							poseAnimations(group, (i / anim_fps) % lengths[g]);
+							const tile = renderFrame(anim_angle, size, options);
+							if (group_gifs && i < counts[g]) {
+								addGifFrame(group_gifs[g], tile, delay, transparent);
+							}
+							cells.push({ label: names[g], canvas: tile });
+						});
 						addGifFrame(
-							gif,
-							renderFrame(anim_angle, size, options),
+							sheet_gif,
+							composeSheet(gridRows(cells), size, options),
 							delay,
 							transparent,
 						);
 						await tick();
 					}
-					// With overlays the base animation still names the file. Only a
-					// fully layered run has no single base to name it after.
-					const label =
-						form.anim_mode === "layered" && group.length > 1
-							? "animations"
-							: safeName(group[0].name);
-					const file_name = prefix + "_" + label + suffix(size) + ".gif";
+
+					if (group_gifs) {
+						group_gifs.forEach((gif, g) => {
+							const file_name = prefix + "_" + names[g] + suffix(size) + ".gif";
+							writeBase64(
+								joinPath(folder, file_name),
+								bytesToBase64(finishGif(gif)),
+							);
+							written.push(file_name);
+						});
+					}
+					const sheet_name = prefix + "_sheet_animations" + suffix(size) + ".gif";
 					writeBase64(
-						joinPath(folder, file_name),
-						bytesToBase64(finishGif(gif)),
+						joinPath(folder, sheet_name),
+						bytesToBase64(finishGif(sheet_gif)),
 					);
-					written.push(file_name);
+					written.push(sheet_name);
+				} else if (anim_gifs) {
+					for (const group of anim_groups) {
+						const length = longestLength(group);
+						const count = groupFrameCount(group, anim_fps);
+						const transparent = !options.background;
+						const delay = frameDelay(anim_fps);
+						const gif = startGif();
+						for (let i = 0; i < count; i++) {
+							poseAnimations(group, (i / anim_fps) % length);
+							addGifFrame(
+								gif,
+								renderFrame(anim_angle, size, options),
+								delay,
+								transparent,
+							);
+							await tick();
+						}
+						// With overlays the base animation still names the file. Only a
+						// fully layered run has no single base to name it after.
+						const label =
+							form.anim_export === "layered" && group.length > 1
+								? "animations"
+								: safeName(group[0].name);
+						const file_name = prefix + "_" + label + suffix(size) + ".gif";
+						writeBase64(
+							joinPath(folder, file_name),
+							bytesToBase64(finishGif(gif)),
+						);
+						written.push(file_name);
+					}
 				}
 			}
 		} finally {
@@ -935,17 +1281,27 @@
 
 	function describeRun(form) {
 		const sizes = collectSizes(form);
-		const stills = collectStills(form).length;
+		const stills = collectStills(form);
+		const sheetable = stills.filter((angle) => angle.sheetable).length;
+		const images =
+			stills.length - sheetable + (form.stills_export === "sheets" ? 0 : sheetable);
+		const still_sheets = sheetable ? stillSheetLayouts(form).length : 0;
 		const gif_frames = gifFrameCount(form);
 		const groups = animationGroups(form);
 		const overlays = form.animations ? overlayAnimations(form).length : 0;
-		const per_size = stills + (gif_frames ? 1 : 0) + groups.length;
+		const anim_gifs = animationsToGifs(form) ? groups.length : 0;
+		const anim_sheet = animationsToSheet(form) && groups.length > 0;
+		const per_size =
+			images + still_sheets + (gif_frames ? 1 : 0) + anim_gifs + (anim_sheet ? 1 : 0);
 
 		if (!per_size) return "Nothing selected yet.";
 		if (!sizes.length) return "Pick at least one image size.";
 
 		const parts = [];
-		if (stills) parts.push(stills + (stills === 1 ? " image" : " images"));
+		if (images) parts.push(images + (images === 1 ? " image" : " images"));
+		if (still_sheets) {
+			parts.push(still_sheets + (still_sheets === 1 ? " sheet" : " sheets"));
+		}
 		if (gif_frames) {
 			const seconds = clamp(form.gif_seconds || 3, 0.2, 30);
 			const spinning = resolveTurntableAnimations(form).length;
@@ -962,11 +1318,10 @@
 						: ""),
 			);
 		}
-		if (groups.length) {
+		if (anim_gifs) {
 			let text =
-				groups.length +
-				(groups.length === 1 ? " animation GIF" : " animation GIFs");
-			if (overlays && form.anim_mode !== "layered") {
+				anim_gifs + (anim_gifs === 1 ? " animation GIF" : " animation GIFs");
+			if (overlays && form.anim_export !== "layered") {
 				text +=
 					" with " +
 					overlays +
@@ -974,6 +1329,13 @@
 					" on top of each";
 			}
 			parts.push(text);
+		}
+		if (anim_sheet) {
+			parts.push(
+				"an animation sheet of " +
+					groups.length +
+					(groups.length === 1 ? " animation" : " animations"),
+			);
 		}
 
 		const total = per_size * sizes.length;
@@ -990,11 +1352,45 @@
 			null,
 			sizes.map((size) => Math.max(size.width, size.height)),
 		);
-		if ((gif_frames || groups.length) && largest > 1024) {
+		if ((gif_frames || anim_gifs || anim_sheet) && largest > 1024) {
 			text +=
 				" GIFs at " +
 				largest +
 				" pixels will be very large files and slow to write.";
+		}
+
+		// Sheets are never shrunk. Past the canvas ceiling the run stops, and a
+		// very large animation sheet only earns a warning.
+		const sheets = plannedSheets(form, sizes, groups.length);
+		const blocked = sheets.find((sheet) => exceedsCanvas(sheet.dimensions));
+		if (blocked) {
+			text +=
+				" **The " +
+				blocked.label +
+				" would be " +
+				blocked.dimensions.width +
+				" by " +
+				blocked.dimensions.height +
+				" at " +
+				blocked.size.label +
+				", which is more than Blockbench can draw, so the run will stop.**";
+		} else {
+			const heavy = sheets
+				.filter((sheet) => sheet.animated)
+				.find(
+					(sheet) =>
+						Math.max(sheet.dimensions.width, sheet.dimensions.height) > 4096,
+				);
+			if (heavy) {
+				text +=
+					" The animation sheet will be " +
+					heavy.dimensions.width +
+					" by " +
+					heavy.dimensions.height +
+					" at " +
+					heavy.size.label +
+					". This may freeze Blockbench.";
+			}
 		}
 		return text;
 	}
@@ -1022,6 +1418,13 @@
 		return { 512: true };
 	}
 
+	// The Combine dropdown was replaced by Export as. Carry a saved "layered"
+	// choice across so nobody's setup silently changes.
+	function storedAnimExport(stored) {
+		if (stored.anim_export) return stored.anim_export;
+		return stored.anim_mode === "layered" ? "layered" : "separate";
+	}
+
 	function buildDialog() {
 		const stored = loadSettings();
 		dialog_animations = listAnimations();
@@ -1043,7 +1446,7 @@
 		const form_fields = {
 			stills_header: {
 				type: "info",
-				text: "**Still images.** One PNG per angle you tick.",
+				text: "**Still images.** One PNG per angle you tick. Sides, top and bottom, and isometric views can also be grouped into sheets, with each view's name above it.",
 				full_width: true,
 			},
 			sides: {
@@ -1060,6 +1463,28 @@
 				type: "checkbox",
 				label: "Isometric corners",
 				value: stored.isometric ?? true,
+			},
+			stills_export: {
+				type: "select",
+				label: "Export as",
+				value: stored.stills_export || "separate",
+				options: {
+					separate: "Separate images",
+					sheets: "Sheets",
+					both: "Both",
+				},
+				condition: (form) => form.sides || form.top_bottom || form.isometric,
+			},
+			sheet_six: {
+				type: "select",
+				label: "Sheet layout",
+				value: stored.sheet_six || "separate",
+				options: {
+					separate: "Sides, top/bottom apart",
+					combined: "All six together",
+				},
+				condition: (form) =>
+					form.sides && form.top_bottom && form.stills_export !== "separate",
 			},
 			current_view: {
 				type: "checkbox",
@@ -1147,7 +1572,7 @@
 			_2: "_",
 			animations_header: {
 				type: "info",
-				text: "**Animation GIFs.** One looping GIF per animation, each as long as the animation itself. Anything set to layer on top plays at the same time as every one of them.",
+				text: "**Animation GIFs.** One looping GIF per animation, each as long as the animation itself. Anything set to layer on top plays at the same time as every one of them. A sheet puts them side by side in one GIF, each named above.",
 				full_width: true,
 				condition: () => dialog_animations.length > 0,
 			},
@@ -1173,13 +1598,15 @@
 				full_width: true,
 				condition: (form) => form.animations,
 			},
-			anim_mode: {
+			anim_export: {
 				type: "select",
-				label: "Combine",
-				value: stored.anim_mode || "separate",
+				label: "Export as",
+				value: storedAnimExport(stored),
 				options: {
-					separate: "One GIF per animation",
-					layered: "One GIF, everything at once",
+					separate: "One GIF each",
+					layered: "One GIF, all layered",
+					sheet: "One sheet",
+					both: "GIFs and a sheet",
 				},
 				condition: (form) => form.animations,
 			},
@@ -1227,6 +1654,16 @@
 				label: "Smooth edges",
 				value: stored.supersample ?? false,
 				description: "Leave off for crisp pixel art.",
+			},
+			sheet_labels: {
+				type: "checkbox",
+				label: "Sheet labels",
+				value: stored.sheet_labels ?? true,
+				condition: (form) =>
+					(stillsToSheets(form) &&
+						(form.sides || form.top_bottom || form.isometric)) ||
+					(form.animations && animationsToSheet(form)),
+				description: "The view or animation name above each tile.",
 			},
 			shading: {
 				type: "checkbox",
@@ -1341,7 +1778,7 @@
 		description:
 			"Renders the open model from preset camera angles at one or more resolutions, with an optional turntable GIF.",
 		icon: "photo_camera",
-		version: "2.1.0",
+		version: "2.2.0",
 		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {

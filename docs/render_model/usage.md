@@ -14,6 +14,30 @@ One PNG per angle you tick.
 - `Current view`: copies whatever your viewport shows, including a perspective camera. Frame the shot before opening the dialog.
 - `Views around model`: a numbered ring of stills. Eight gives one every 45 degrees. Enable it with the checkbox at the end of the row.
 - `Camera height`: how far above the model that ring sits, in degrees. Zero is level with it, 90 is directly overhead, negative looks up from below.
+- `Export as`: `Separate images` writes one PNG per view, as above. `Sheets` groups the views into sheets instead, and `Both` writes the separate images and the sheets. Views around the model and the current view are always separate images.
+- `Sheet layout`: shown when both `Four sides` and `Top and bottom` are ticked. `Sides, top/bottom apart` writes two sheets, and `All six together` writes one.
+
+### Sheets
+
+A sheet is one PNG with several views on it, each with its name above. Every tile is the size you picked, so a 512 sheet keeps each view at 512, and every tile shares the run's scale, so the model is the same size in all of them. Four views always sit two over two.
+
+```
+Isometric            Sides              Top and bottom
+┌──────┬──────┐     ┌──────┬──────┐     ┌──────┬──────┐
+│F left│F rght│     │Front │Right │     │ Top  │Bottom│
+├──────┼──────┤     ├──────┼──────┤     └──────┴──────┘
+│B left│B rght│     │ Back │ Left │
+└──────┴──────┘     └──────┴──────┘
+
+All six together
+┌──────┬──────┬──────┐
+│Front │Right │ Top  │
+├──────┼──────┼──────┤
+│ Back │ Left │Bottom│
+└──────┴──────┴──────┘
+```
+
+The sides read as one rotation, front, right, back, left.
 
 ## Turntable GIF
 
@@ -32,11 +56,17 @@ One looping GIF per animation, each as long as the animation itself. Frames come
 - `Render these`: the base animations. You get one GIF for each, named after it.
 - `Render all` / `Render none`: ticks or clears the list above.
 - `Layer on top`: animations that play at the same time as every base animation. Idle, blinking, a breathing loop. These never get a GIF of their own.
-- `Combine`: `One GIF per animation` gives a file for each base with the overlays on top. `One GIF, everything at once` collapses bases and overlays into a single file.
+- `Export as`: `One GIF each` gives a file for each base with the overlays on top. `One GIF, all layered` collapses bases and overlays into a single file. `One sheet` puts every base animation side by side in a single GIF, each named above, and `GIFs and a sheet` writes both.
 - `Smoothness`: frames per second for these GIFs, set separately from the turntable.
 - `Camera angle`: a fixed camera for all of them.
 
 For example, ticking `swim` and `swim_left` under Render these, with `idle` and a blink under Layer on top, writes `swim.gif` and `swim_left.gif`, each with idle and the blink playing over the top.
+
+### Animation sheet
+
+The sheet uses the most compact grid for the number of animations: up to three in a row, four as two over two, then close to square, with a short last row centred. Overlays play in every tile.
+
+The sheet runs as long as its longest animation, and shorter ones loop inside it. A short animation can jump back to its start when the GIF restarts. Choosing `GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
 
 ## Image size
 
@@ -45,6 +75,7 @@ Everything above is written once per size, so two sizes doubles the output.
 - `Size`: 512, 1024, 2048 and 4096. Pick as many as you want.
 - `Custom sizes`: anything else, comma separated. A bare number is square, or write `320x180` for a rectangle.
 - `Smooth edges`: renders at four times the size and scales down. Leave it off for pixel art. The multiplier drops automatically at large sizes so no single render exceeds 4096.
+- `Sheet labels`: shown when any sheet is being made. The name above each tile, dark text on a light band. Untick it for sheets without names.
 - `Shading`: Blockbench's per-face brightness. Off gives flat texture colours.
 - `Player for scale`: a half transparent, player-proportioned figure standing to one side, feet level with the model's lowest point.
 - `Background`: off means transparent. A solid colour also gives GIFs cleaner edges.
@@ -76,6 +107,11 @@ Each run creates its own folder inside the parent, named after the prefix. A sec
 | Turntable GIF | `green_turtle_turntable.gif` |
 | Animation GIF | `green_turtle_swim.gif`, one per base animation |
 | Everything at once | `green_turtle_animations.gif` |
+| Isometric sheet | `green_turtle_sheet_isometric.png` |
+| Sides sheet | `green_turtle_sheet_sides.png` |
+| Top and bottom sheet | `green_turtle_sheet_top_bottom.png` |
+| All six together | `green_turtle_sheet_all_views.png` |
+| Animation sheet | `green_turtle_sheet_animations.gif` |
 | More than one size | the size is appended, as in `green_turtle_front_1024.png` |
 
 The `animation.` prefix is stripped from animation names, so `animation.green_turtle.swim` becomes `swim`.
@@ -84,12 +120,15 @@ The `animation.` prefix is stripped from animation names, so `animation.green_tu
 
 - Leave `Smooth edges` off for pixel art. It only softens what should be crisp.
 - Render stills at 4096 if you need them, but keep GIFs at 512 or 1024. Large GIFs are impractical files.
+- Keep animation sheets small. Nine animations at 2048 per tile make a GIF over 6000 pixels wide, and the summary line warns you once a sheet passes 4096.
 - Set a background colour when a GIF needs clean edges or when the player reference should look half transparent.
 - Return to edit mode before rendering stills if you do not want a posed model.
 
 ## Additional notes
 
 GIF holds 256 colours and on-off transparency with nothing in between, so a half transparent pixel becomes fully solid or fully gone. Setting a background colour bakes the blend in and avoids it.
+
+Sheets are never shrunk to fit. The one exception is a sheet too large for Blockbench to draw at all, which only happens with many animations at 4096. The summary line says so in bold and the run stops before writing anything.
 
 Animation selections are not remembered between sessions, because Blockbench identifies animations by an id unique to each project. Every other setting in the dialog persists.
 

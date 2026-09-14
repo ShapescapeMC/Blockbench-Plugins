@@ -6,7 +6,7 @@ This repository hosts a set of custom plugins for the open-source 3D modelling s
 
 ## 🧑‍🏫 About
 ### Render Model
-This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass. Animations can be layered, so an idle or a blink plays over a walk cycle, and every run writes into its own folder.
+This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass. Animations can be layered, so an idle or a blink plays over a walk cycle, views and animations can be grouped into labelled sheets, and every run writes into its own folder.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
