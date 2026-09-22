@@ -331,6 +331,45 @@
 		return selectedAnimations(form.gif_animations);
 	}
 
+	function gcd(a, b) {
+		a = Math.round(Math.abs(a));
+		b = Math.round(Math.abs(b));
+		while (b) {
+			const rest = a % b;
+			a = b;
+			b = rest;
+		}
+		return a || 1;
+	}
+
+	// Past this a sheet would take longer to render than anyone would wait, so
+	// the common loop is abandoned rather than started.
+	const MAX_SHEET_FRAMES = 9000;
+
+	// How many frames until every group is back at its own loop point together.
+	// Worked out in frames so each one lands exactly on a rendered frame.
+	function commonFrameCount(groups, fps, fallback) {
+		let frames = 1;
+		for (const group of groups) {
+			const count = groupFrameCount(group, fps, fallback);
+			frames = (frames / gcd(frames, count)) * count;
+			if (frames > MAX_SHEET_FRAMES) return null;
+		}
+		return Math.max(1, Math.round(frames));
+	}
+
+	// Frames for the sheet: long enough for every tile to loop cleanly, or just
+	// the longest animation when asked for that or when looping is impractical.
+	function sheetFrameCount(form, groups, fps, fallback) {
+		const longest = Math.max(
+			...groups.map((group) => groupFrameCount(group, fps, fallback)),
+		);
+		if (form.sheet_length === "longest") return { frames: longest, looped: true };
+		const common = commonFrameCount(groups, fps, fallback);
+		if (common === null) return { frames: longest, looped: false };
+		return { frames: common, looped: true };
+	}
+
 	function groupFrameCount(group, fps, fallback) {
 		return Math.max(1, Math.round(longestLength(group, fallback) * fps));
 	}
@@ -1065,11 +1104,7 @@
 			0,
 		);
 		const sheet_frames = anim_sheet
-			? Math.max(
-					...anim_groups.map((group) =>
-						groupFrameCount(group, anim_fps, loop_seconds),
-					),
-				)
+			? sheetFrameCount(form, anim_groups, anim_fps, loop_seconds).frames
 			: 0;
 		const total =
 			sizes.length *
@@ -1358,12 +1393,32 @@
 			}
 			parts.push(text);
 		}
+		let sheet_note = "";
 		if (anim_sheet) {
+			const fps = smoothness(form.anim_smoothness);
+			const sheet = sheetFrameCount(form, groups, fps, loopSeconds(form));
+			const seconds = Math.round((sheet.frames / fps) * 10) / 10;
 			parts.push(
 				"an animation sheet of " +
 					groups.length +
-					(groups.length === 1 ? " animation" : " animations"),
+					(groups.length === 1 ? " animation" : " animations") +
+					", " +
+					seconds +
+					" seconds and " +
+					sheet.frames +
+					" frames",
 			);
+			if (!sheet.looped) {
+				sheet_note =
+					" **Looping every tile together would need more than " +
+					MAX_SHEET_FRAMES +
+					" frames, so the sheet runs for the longest animation instead and shorter ones will jump when it restarts.**";
+			} else if (sheet.frames > 600) {
+				sheet_note =
+					" The sheet is " +
+					sheet.frames +
+					" frames long because that is where every animation loops together.";
+			}
 		}
 
 		const total = per_size * sizes.length;
@@ -1375,6 +1430,8 @@
 			": " +
 			parts.join(", ") +
 			".";
+
+		text += sheet_note;
 
 		const largest = Math.max.apply(
 			null,
@@ -1688,9 +1745,17 @@
 					const result = Dialog.open.getFormResult();
 					const chosen = selectedAnimations(result.gif_animations);
 					if (!chosen.length) return;
+					// Match the spin to where every chosen animation loops together,
+					// so the rotation and the animations restart as one.
+					const fps = smoothness(result.gif_smoothness);
+					const groups = chosen.map((animation) => [animation]);
+					const common = commonFrameCount(groups, fps, loopSeconds(result));
+					const seconds =
+						common === null
+							? longestLength(chosen, loopSeconds(result))
+							: common / fps;
 					Dialog.open.setFormValues({
-						gif_seconds:
-							Math.round(longestLength(chosen, loopSeconds(result)) * 10) / 10,
+						gif_seconds: Math.round(seconds * 10) / 10,
 					});
 				},
 			},
@@ -1746,6 +1811,19 @@
 				text: "",
 				full_width: true,
 				condition: (form) => animationsEnabled(form),
+			},
+			sheet_length: {
+				type: "select",
+				label: "Sheet length",
+				value: stored.sheet_length || "loop_together",
+				options: {
+					loop_together: "Until they all loop together",
+					longest: "The longest animation",
+				},
+				condition: (form) =>
+					animationsEnabled(form) && animationsToSheet(form),
+				description:
+					"Looping together means no tile jumps when the GIF restarts, at the cost of a longer file.",
 			},
 			loop_seconds: {
 				type: "number",
@@ -1929,7 +2007,7 @@
 		description:
 			"Renders the open model from preset camera angles at one or more resolutions, with an optional turntable GIF.",
 		icon: "photo_camera",
-		version: "2.3.0",
+		version: "2.4.0",
 		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {

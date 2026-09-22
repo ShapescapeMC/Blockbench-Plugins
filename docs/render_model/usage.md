@@ -47,7 +47,7 @@ One full spin around the model, looping.
 - `Smoothness`: frames per second. The frame count is worked out for you from the duration.
 - `Camera height`: the angle the camera looks down from while it spins, in degrees.
 - `Play while spinning`: pick any number of animations and they all play together underneath the rotation. This list is independent of the animation GIF section.
-- `Match spin to animation length`: sets the spin duration to the longest animation you picked, so the rotation and the animation finish together and the loop is seamless.
+- `Match spin to animation length`: sets the spin duration to the point where every animation you picked loops together, so the rotation and the animations restart as one.
 
 ## Animation GIFs
 
@@ -77,7 +77,13 @@ For example, ticking `swim` and `swim_left` under Render these, with `idle` and 
 
 The sheet uses the most compact grid for the number of animations: up to three in a row, four as two over two, then close to square, with a short last row centred. Overlays play in every tile.
 
-The sheet runs as long as its longest animation, and shorter ones loop inside it. A short animation can jump back to its start when the GIF restarts. Choosing `Separate GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
+By default the sheet runs until every animation is back at its own loop point at the same moment, so nothing jumps when the GIF restarts. With a 4 second idle beside four 3 second swims, that is 12 seconds. Mixed lengths can make this long: a 10 second idle beside a 1.3 second swim needs 130 seconds. The summary line always states the sheet's length and frame count before you confirm.
+
+- `Sheet length`: `Until they all loop together` is the default described above. `The longest animation` runs only as long as the longest one, so shorter tiles loop inside it and can jump on restart. It is much shorter to render.
+
+If looping every tile together would need more than 9000 frames, the sheet falls back to the longest animation and the summary says so in bold.
+
+Choosing `Separate GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
 
 ## Image size
 
