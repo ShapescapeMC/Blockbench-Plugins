@@ -331,8 +331,8 @@
 		return selectedAnimations(form.gif_animations);
 	}
 
-	function groupFrameCount(group, fps) {
-		return Math.max(1, Math.round(longestLength(group) * fps));
+	function groupFrameCount(group, fps, fallback) {
+		return Math.max(1, Math.round(longestLength(group, fallback) * fps));
 	}
 
 	// Blockbench stacks every animation whose `playing` flag is set, so layering
@@ -358,12 +358,26 @@
 		Animator.preview();
 	}
 
-	function longestLength(animations) {
+	// A Molang-driven animation has no length: the motion comes from maths
+	// evaluated against the timeline, so it runs forever. Those need a recording
+	// length from the dialog rather than a guess.
+	function isEndless(animation) {
+		return !animation.length;
+	}
+
+	function loopSeconds(form) {
+		return clamp(form.loop_seconds || 3, 0.2, 60);
+	}
+
+	function longestLength(animations, fallback) {
+		const seconds = clamp(fallback || 3, 0.2, 60);
+		if (!animations.length) return seconds;
 		let longest = 0;
 		animations.forEach((animation) => {
-			longest = Math.max(longest, animation.length || 1);
+			longest = Math.max(longest, animation.length || 0);
 		});
-		return longest || 1;
+		if (animations.some(isEndless)) return Math.max(longest, seconds);
+		return longest || seconds;
 	}
 
 	function enterAnimateMode() {
@@ -385,11 +399,11 @@
 
 	// Animated limbs reach outside the rest pose, so the frame has to account for
 	// every pose the run will render.
-	function unionAnimationBounds(groups, fps, base_box) {
+	function unionAnimationBounds(groups, fps, base_box, fallback) {
 		const box = base_box.clone();
 		groups.forEach((group) => {
 			if (!group.length) return;
-			const length = longestLength(group);
+			const length = longestLength(group, fallback);
 			const count = Math.max(1, Math.round(length * fps));
 			for (let i = 0; i < count; i++) {
 				poseAnimations(group, (i / fps) % length);
@@ -981,6 +995,7 @@
 
 		const anim_fps = smoothness(form.anim_smoothness);
 		const gif_fps = smoothness(form.gif_smoothness);
+		const loop_seconds = loopSeconds(form);
 		const gif_animations = resolveTurntableAnimations(form);
 		const posed_groups = anim_groups.concat(
 			gif_animations.length ? [gif_animations] : [],
@@ -996,6 +1011,7 @@
 				posed_groups,
 				Math.max(anim_fps, gif_fps),
 				box,
+				loop_seconds,
 			);
 		}
 
@@ -1045,11 +1061,15 @@
 		const anim_sheet = animationsToSheet(form) && anim_groups.length > 0;
 
 		const animation_frames = anim_groups.reduce(
-			(sum, group) => sum + groupFrameCount(group, anim_fps),
+			(sum, group) => sum + groupFrameCount(group, anim_fps, loop_seconds),
 			0,
 		);
 		const sheet_frames = anim_sheet
-			? Math.max(...anim_groups.map((group) => groupFrameCount(group, anim_fps)))
+			? Math.max(
+					...anim_groups.map((group) =>
+						groupFrameCount(group, anim_fps, loop_seconds),
+					),
+				)
 			: 0;
 		const total =
 			sizes.length *
@@ -1141,7 +1161,7 @@
 					const delay = frameDelay(gif_fps);
 					const gif = startGif();
 					const spin_length = gif_animations.length
-						? longestLength(gif_animations)
+						? longestLength(gif_animations, loop_seconds)
 						: 0;
 					for (let i = 0; i < gif_directions.length; i++) {
 						if (spin_length) {
@@ -1166,9 +1186,11 @@
 				if (anim_sheet) {
 					const transparent = !options.background;
 					const delay = frameDelay(anim_fps);
-					const lengths = anim_groups.map((group) => longestLength(group));
+					const lengths = anim_groups.map((group) =>
+						longestLength(group, loop_seconds),
+					);
 					const counts = anim_groups.map((group) =>
-						groupFrameCount(group, anim_fps),
+						groupFrameCount(group, anim_fps, loop_seconds),
 					);
 					const names = anim_groups.map((group) => safeName(group[0].name));
 					const group_gifs = anim_gifs ? anim_groups.map(() => startGif()) : null;
@@ -1214,8 +1236,8 @@
 					written.push(sheet_name);
 				} else if (anim_gifs) {
 					for (const group of anim_groups) {
-						const length = longestLength(group);
-						const count = groupFrameCount(group, anim_fps);
+						const length = longestLength(group, loop_seconds);
+						const count = groupFrameCount(group, anim_fps, loop_seconds);
 						const transparent = !options.background;
 						const delay = frameDelay(anim_fps);
 						const gif = startGif();
@@ -1428,11 +1450,29 @@
 			);
 		}
 
+		const endless = selectedAnimations(form.anim_main)
+			.concat(overlayAnimations(form))
+			.filter(isEndless)
+			.map((a) => safeName(a.name));
+		const note = endless.length
+			? " " +
+				shortList(endless) +
+				(endless.length === 1 ? " has" : " have") +
+				" no length of " +
+				(endless.length === 1 ? "its" : "their") +
+				" own, so " +
+				(endless.length === 1 ? "it is" : "they are") +
+				" recorded for " +
+				loopSeconds(form) +
+				" seconds."
+			: "";
+
 		const count = mains.length;
 		const on_top = overlays.length
 			? ", with " + shortList(overlays) + " playing on top"
 			: "";
 
+		const describe = () => {
 		switch (form.anim_export) {
 			case "layered": {
 				const all = dedupeAnimations(
@@ -1471,6 +1511,8 @@
 							on_top +
 							".";
 		}
+		};
+		return describe() + note;
 	}
 
 	// Info lines are built once, so the only way to change their text later is
@@ -1514,6 +1556,7 @@
 				? path.dirname(Project.export_path)
 				: "");
 
+		const endless_animations = dialog_animations.filter(isEndless);
 		const animation_options = {};
 		const all_animations_on = {};
 		const no_animations_on = {};
@@ -1632,6 +1675,8 @@
 				options: animation_options,
 				full_width: true,
 				condition: (form) => form.gif && dialog_animations.length > 0,
+				description:
+					"Animations with no length of their own use the endless animation length set in the next section.",
 			},
 			gif_sync: {
 				type: "buttons",
@@ -1640,12 +1685,12 @@
 				full_width: true,
 				condition: (form) => form.gif && dialog_animations.length > 0,
 				click() {
-					const chosen = selectedAnimations(
-						Dialog.open.getFormResult().gif_animations,
-					);
+					const result = Dialog.open.getFormResult();
+					const chosen = selectedAnimations(result.gif_animations);
 					if (!chosen.length) return;
 					Dialog.open.setFormValues({
-						gif_seconds: Math.round(longestLength(chosen) * 10) / 10,
+						gif_seconds:
+							Math.round(longestLength(chosen, loopSeconds(result)) * 10) / 10,
 					});
 				},
 			},
@@ -1701,6 +1746,20 @@
 				text: "",
 				full_width: true,
 				condition: (form) => animationsEnabled(form),
+			},
+			loop_seconds: {
+				type: "number",
+				label: "Endless animation length",
+				value: stored.loop_seconds ?? 3,
+				min: 0.2,
+				max: 60,
+				step: 0.5,
+				condition: (form) =>
+					endless_animations.length > 0 &&
+					(animationsEnabled(form) ||
+						resolveTurntableAnimations(form).length > 0),
+				description:
+					"Molang-driven animations never end, so this is how many seconds of them to record.",
 			},
 			anim_smoothness: {
 				type: "select",
@@ -1870,7 +1929,7 @@
 		description:
 			"Renders the open model from preset camera angles at one or more resolutions, with an optional turntable GIF.",
 		icon: "photo_camera",
-		version: "2.2.0",
+		version: "2.3.0",
 		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {

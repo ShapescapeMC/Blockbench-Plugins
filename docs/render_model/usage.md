@@ -61,6 +61,15 @@ Only animations loaded into the open project can be rendered. If the model's ani
 - `Export as`: `Separate GIFs` gives a file for each base with the overlays on top. `One GIF, played together` plays the bases and overlays at the same time on the one model, in a single file. `One sheet, side by side` puts every base animation next to each other in a single GIF, each named above, and `Separate GIFs and a sheet` writes both. A sentence under the dropdown describes exactly what the current choice will make, using the animations you ticked.
 - `Smoothness`: frames per second for these GIFs, set separately from the turntable.
 - `Camera angle`: a fixed camera for all of them.
+- `Endless animation length`: how many seconds to record an animation that has no length of its own. It only appears when the project has one.
+
+### Animations driven by Molang
+
+An animation built from Molang expressions rather than keyframes has no length. The motion comes from maths evaluated against the timeline, so it runs forever, and Blockbench stores its length as zero.
+
+There is no length to read, so the plugin records these for `Endless animation length` seconds, three by default. The line under `Export as` names any animation this applies to. If a group mixes an endless animation with a keyframed one, the keyframed length wins and the endless one simply keeps playing underneath.
+
+The same length applies to endless animations picked under `Play while spinning` in the turntable section.
 
 For example, ticking `swim` and `swim_left` under Render these, with `idle` and a blink under Layer on top, writes `swim.gif` and `swim_left.gif`, each with idle and the blink playing over the top.
 
