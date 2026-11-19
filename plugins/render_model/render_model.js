@@ -346,12 +346,15 @@
 	// the common loop is abandoned rather than started.
 	const MAX_SHEET_FRAMES = 9000;
 
-	// How many frames until every group is back at its own loop point together.
-	// Worked out in frames so each one lands exactly on a rendered frame.
+	// How many frames until every group, and every flipbook texture, is back at
+	// its own loop point together. Worked out in frames so each one lands
+	// exactly on a rendered frame.
 	function commonFrameCount(groups, fps, fallback) {
+		const counts = groups
+			.map((group) => groupFrameCount(group, fps, fallback))
+			.concat(flipbookCycleFrames(loopingFlipbooks(), fps));
 		let frames = 1;
-		for (const group of groups) {
-			const count = groupFrameCount(group, fps, fallback);
+		for (const count of counts) {
 			frames = (frames / gcd(frames, count)) * count;
 			if (frames > MAX_SHEET_FRAMES) return null;
 		}
@@ -434,6 +437,103 @@
 		if (previous_mode && Modes.options[previous_mode] && Mode.selected.id !== previous_mode) {
 			Modes.options[previous_mode].select();
 		}
+	}
+
+	// ----- flipbook textures -----
+	// In the viewport Blockbench plays flipbook textures on a wall clock, and
+	// follows the timeline only while an animation is posed. A render steps
+	// them from each frame's own time instead, so they animate in every GIF,
+	// including a turntable with no animations, and hold still in stills.
+	function flipbookTextures() {
+		if (typeof TextureAnimator === "undefined" || typeof Texture === "undefined") {
+			return [];
+		}
+		return Texture.all.filter((texture) => texture.frameCount > 1);
+	}
+
+	// The rate Blockbench plays them at: ticks per frame for formats with
+	// .mcmeta files, frames per second otherwise.
+	function flipbookFps(texture) {
+		return Format.texture_mcmeta
+			? 1000 / Math.max(16.66, 50 * texture.frame_time)
+			: Math.max(1, texture.fps);
+	}
+
+	// One full pass through the frame order, in seconds. Counted the way
+	// Blockbench steps through the order, so the loop point matches the viewport.
+	function flipbookCycleSeconds(texture) {
+		const count = texture.frameCount;
+		let steps = count;
+		if (texture.frame_order_type === "custom" && texture.frame_order) {
+			steps = texture.frame_order.split(/\s+/g).length;
+		} else if (texture.frame_order_type === "back_and_forth") {
+			steps = Math.max(1, count * 2 - 2);
+		}
+		return steps / flipbookFps(texture);
+	}
+
+	function flipbookCycleFrames(textures, fps) {
+		return textures.map((texture) =>
+			Math.max(1, Math.round(flipbookCycleSeconds(texture) * fps)),
+		);
+	}
+
+	// Blockbench's own "Play Flipbook Textures in Animation" setting doubles as
+	// the off switch, so a render matches what the viewport shows while posed.
+	function flipbooksFollowTime() {
+		const setting = settings.flipbook_textures_in_animation;
+		return !setting || setting.value !== false;
+	}
+
+	// The flipbooks a render will step, and so the ones whose loops the sheet
+	// and turntable lengths have to wait for.
+	function loopingFlipbooks() {
+		return flipbooksFollowTime() ? flipbookTextures() : [];
+	}
+
+	// Pauses the viewport's own playback for the run and remembers which frame
+	// each texture showed, so stills use that frame and the viewport gets it back.
+	function takeFlipbooks() {
+		const textures = flipbookTextures();
+		if (!textures.length) return null;
+		const state = {
+			textures,
+			frames: textures.map((texture) => texture.currentFrame || 0),
+			playing: TextureAnimator.isPlaying,
+			follow: flipbooksFollowTime(),
+		};
+		if (state.playing) TextureAnimator.stop();
+		return state;
+	}
+
+	// Posing an animation moves flipbooks to the timeline time, which wraps at
+	// the animation's length. Calling this after posing puts them on the
+	// frame's real time instead, so a texture loop longer than the animation
+	// still plays through.
+	function showFlipbookFrame(state, time) {
+		if (!state) return;
+		if (!state.follow) {
+			holdFlipbooks(state);
+			return;
+		}
+		TextureAnimator.playAnimationFrame(time);
+	}
+
+	function holdFlipbooks(state) {
+		if (!state) return;
+		const changed = state.textures.filter(
+			(texture, i) => texture.currentFrame !== state.frames[i],
+		);
+		state.textures.forEach((texture, i) => {
+			texture.currentFrame = state.frames[i];
+		});
+		if (changed.length) TextureAnimator.update(changed);
+	}
+
+	function restoreFlipbooks(state) {
+		if (!state) return;
+		holdFlipbooks(state);
+		if (state.playing) TextureAnimator.start();
 	}
 
 	// Animated limbs reach outside the rest pose, so the frame has to account for
@@ -1042,6 +1142,7 @@
 
 		const previous_animation =
 			typeof Animation !== "undefined" ? Animation.selected : null;
+		const flipbooks = takeFlipbooks();
 		let previous_mode = null;
 		let bounds = box;
 		if (posed_groups.length) {
@@ -1141,6 +1242,10 @@
 				const tiles = {};
 				const pending = still_sheets.slice();
 
+				// Stills show the frame the viewport showed, whatever the previous
+				// size's GIFs or the bounds pass left behind.
+				holdFlipbooks(flipbooks);
+
 				for (const angle of stills) {
 					const canvas = renderFrame(angle, size, options);
 
@@ -1202,6 +1307,7 @@
 						if (spin_length) {
 							poseAnimations(gif_animations, (i / gif_fps) % spin_length);
 						}
+						showFlipbookFrame(flipbooks, i / gif_fps);
 						addGifFrame(
 							gif,
 							renderFrame({ direction: gif_directions[i] }, size, options),
@@ -1238,6 +1344,7 @@
 						const cells = [];
 						anim_groups.forEach((group, g) => {
 							poseAnimations(group, (i / anim_fps) % lengths[g]);
+							showFlipbookFrame(flipbooks, i / anim_fps);
 							const tile = renderFrame(anim_angle, size, options);
 							if (group_gifs && i < counts[g]) {
 								addGifFrame(group_gifs[g], tile, delay, transparent);
@@ -1278,6 +1385,7 @@
 						const gif = startGif();
 						for (let i = 0; i < count; i++) {
 							poseAnimations(group, (i / anim_fps) % length);
+							showFlipbookFrame(flipbooks, i / anim_fps);
 							addGifFrame(
 								gif,
 								renderFrame(anim_angle, size, options),
@@ -1309,6 +1417,7 @@
 			if (posed_groups.length) {
 				restoreMode(previous_mode, previous_animation);
 			}
+			restoreFlipbooks(flipbooks);
 			if (settings.shading.value !== previous_shading) {
 				settings.shading.set(previous_shading);
 			}
@@ -1417,7 +1526,9 @@
 				sheet_note =
 					" The sheet is " +
 					sheet.frames +
-					" frames long because that is where every animation loops together.";
+					" frames long because that is where every animation" +
+					(loopingFlipbooks().length ? " and flipbook texture" : "") +
+					" loops together.";
 			}
 		}
 
@@ -1740,13 +1851,15 @@
 				label: "",
 				buttons: ["Match spin to animation length"],
 				full_width: true,
-				condition: (form) => form.gif && dialog_animations.length > 0,
+				condition: (form) =>
+					form.gif &&
+					(dialog_animations.length > 0 || loopingFlipbooks().length > 0),
 				click() {
 					const result = Dialog.open.getFormResult();
 					const chosen = selectedAnimations(result.gif_animations);
-					if (!chosen.length) return;
-					// Match the spin to where every chosen animation loops together,
-					// so the rotation and the animations restart as one.
+					if (!chosen.length && !loopingFlipbooks().length) return;
+					// Match the spin to where every chosen animation and flipbook
+					// texture loops together, so they all restart as one.
 					const fps = smoothness(result.gif_smoothness);
 					const groups = chosen.map((animation) => [animation]);
 					const common = commonFrameCount(groups, fps, loopSeconds(result));
@@ -2007,7 +2120,7 @@
 		description:
 			"Renders the open model from preset camera angles at one or more resolutions, with an optional turntable GIF.",
 		icon: "photo_camera",
-		version: "2.4.0",
+		version: "2.5.0",
 		min_version: "5.0.0",
 		variant: "desktop",
 		onload() {

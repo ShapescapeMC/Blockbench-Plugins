@@ -47,7 +47,7 @@ One full spin around the model, looping.
 - `Smoothness`: frames per second. The frame count is worked out for you from the duration.
 - `Camera height`: the angle the camera looks down from while it spins, in degrees.
 - `Play while spinning`: pick any number of animations and they all play together underneath the rotation. This list is independent of the animation GIF section.
-- `Match spin to animation length`: sets the spin duration to the point where every animation you picked loops together, so the rotation and the animations restart as one.
+- `Match spin to animation length`: sets the spin duration to the point where every animation you picked, and every flipbook texture, loops together, so the rotation and the animations restart as one. It also appears for a model with flipbook textures and no animations.
 
 ## Animation GIFs
 
@@ -84,6 +84,17 @@ By default the sheet runs until every animation is back at its own loop point at
 If looping every tile together would need more than 9000 frames, the sheet falls back to the longest animation and the summary says so in bold.
 
 Choosing `Separate GIFs and a sheet` renders everything in one pass, and each animation's own GIF still stops at its own length.
+
+## Flipbook textures
+
+Animated textures, where the frames are stacked in one image and Blockbench plays them in the viewport, play in every GIF: the turntable, the animation GIFs and the animation sheet. Each frame of a GIF shows the texture frame for that moment, at the speed and in the frame order set in the texture's properties, so the timing is exact rather than recorded.
+
+- Stills show the texture frame the viewport shows when you press confirm. Pick a frame with the texture frame slider first if one matters.
+- A flipbook keeps its own time, so a texture loop longer than an animation keeps going rather than restarting with the animation.
+- The animation sheet's `Until they all loop together` length, and `Match spin to animation length`, wait for flipbook loops too.
+- Turning off Blockbench's own `Play Flipbook Textures in Animation` setting, under Settings, Preview, keeps every texture on its current frame in the renders as well.
+
+The viewport's texture playback pauses during a run and resumes afterwards, on the frame it was on.
 
 ## Image size
 
