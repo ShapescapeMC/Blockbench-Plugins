@@ -20,7 +20,7 @@ While the Edge Noise Brush is active, its panel shows on the right in the Paint 
 - Below the list is the selected preset at full size, or a sample edge for random steps.
 - At the bottom is the selected texture as it would look if you painted over all of it with the current preset, settings and colour. Use it to judge a preset before painting.
 
-The buttons along the top add presets from PNG files, save a preset from the texture, open the preset folder, reload the presets, and open the brush settings. Hover over a preset to delete it.
+The buttons along the top add presets from PNG files, save a preset from the texture, make a new folder for presets, open the preset folder, reload the presets, and open the brush settings. Hover over a preset to delete it.
 
 ## Presets
 
@@ -45,7 +45,18 @@ You can also draw one from scratch, the way the finished edge should look:
 
 The brush repeats the edge's shape along every edge you paint over, horizontal and vertical. With `Grow brush colour only` on, the edge is shifted so the colour you paint with only ever grows. When the brush colour is the brighter tone, the bright side of the preset grows into the dark one, and the other way round. With it off, both tones move, and the straight edge sits at the preset's middle line.
 
-Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder. Click the folder button in the panel to open it. You can copy PNGs straight into the folder and click reload. Highlight, shadow and noise presets go in the `highlights`, `shadows` and `noise` folders inside it.
+Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder, with one folder per brush: `edges`, `highlights`, `shadows` and `noise`. Click the folder button in the panel to open the active brush's folder. You can copy PNGs straight into it and click reload. Edge presets from older versions, which sat loose in `edge_noise_presets`, are moved into `edges` automatically.
+
+### Preset folders
+
+Each brush's presets can be sorted into folders, such as `stone` and `wood` inside `shadows`, and folders inside those, up to four deep. In the panel, presets without a folder come first, then each folder as a group you can click to fold away.
+
+- When you save a preset from the texture, a dialog asks for its name and its folder: an existing one, no folder, or `New folder…` with a name such as `stone` or `stone/rough`. The folder you used last is picked by default.
+- Adding PNGs asks for the folder the same way.
+- The new folder button in the panel makes an empty folder to fill later.
+- You can also make and fill folders straight in the file browser and click reload.
+
+Presets are remembered by their folder and name, so moving a preset to another folder makes it a new preset with default options.
 
 ### Preset options
 

@@ -742,7 +742,7 @@
 	};
 	// Brush modes that use presets, and where their presets live.
 	const KINDS = {
-		edge: { folder: '', setting: 'preset', builtin: 'Random steps', builtin_icon: 'shuffle', title: 'Edge Noise Preset' },
+		edge: { folder: 'edges', setting: 'preset', builtin: 'Random steps', builtin_icon: 'shuffle', title: 'Edge Noise Preset' },
 		highlight: { folder: 'highlights', setting: 'highlight_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Highlight Preset' },
 		shadow: { folder: 'shadows', setting: 'shadow_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Shadow Preset' },
 		noise: { folder: 'noise', setting: 'noise_preset', builtin: 'Random noise', builtin_icon: 'blur_on', title: 'Noise Preset' }
@@ -778,6 +778,8 @@
 
 	// kind -> [{ name, url (data URL), parsed, error }]
 	const presets = { edge: [], highlight: [], shadow: [], noise: [] };
+	// kind -> subfolder paths inside that brush's preset folder, including empty ones
+	const presetFolders = { edge: [], highlight: [], shadow: [], noise: [] };
 	let presetFs = null, presetRoot = null, path = null;
 
 	function presetFolder(kind) {
@@ -806,9 +808,53 @@
 				const dir = presetFolder(kind);
 				if (!presetFs.existsSync(dir)) presetFs.mkdirSync(dir, { recursive: true });
 			}
+			// Edge presets used to sit loose in the main folder: move them into their own.
+			try {
+				for (const file of presetFs.readdirSync(root)) {
+					if (!/\.png$/i.test(file)) continue;
+					const to = path.join(presetFolder('edge'), file);
+					if (!presetFs.existsSync(to)) presetFs.renameSync(path.join(root, file), to);
+				}
+			} catch (e) {
+				console.warn('Edge Noise Brush: could not move old edge presets', e);
+			}
 		}
 		return presetFs;
 	}
+
+	const MAX_FOLDER_DEPTH = 4;
+
+	/**
+	 * Lists the PNGs in a brush's preset folder and its subfolders. Names are
+	 * paths relative to it without the extension, such as "stone/rough".
+	 */
+	function listPresetFiles(fs, dir, prefix, depth, files, folders) {
+		let entries = [];
+		try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+		entries.sort((a, b) => a.name.localeCompare(b.name));
+		for (const entry of entries) {
+			const rel = prefix ? prefix + '/' + entry.name : entry.name;
+			if (entry.isDirectory()) {
+				if (depth >= MAX_FOLDER_DEPTH || entry.name.startsWith('.')) continue;
+				folders.push(rel);
+				listPresetFiles(fs, path.join(dir, entry.name), rel, depth + 1, files, folders);
+			} else if (/\.png$/i.test(entry.name)) {
+				files.push(rel.replace(/\.png$/i, ''));
+			}
+		}
+	}
+
+	/** Cleans up a "folder/name" path typed by the user. Returns '' if nothing usable is left. */
+	function cleanPresetPath(value) {
+		return String(value || '').split(/[\\/]+/)
+			.map(part => part.replace(/[:*?"<>|]/g, '').trim().replace(/^\.+/, ''))
+			.filter(Boolean)
+			.slice(0, MAX_FOLDER_DEPTH + 1)
+			.join('/');
+	}
+
+	const folderOf = (name) => name.includes('/') ? name.slice(0, name.lastIndexOf('/')) : '';
+	const baseName = (name) => name.slice(name.lastIndexOf('/') + 1);
 
 	function loadImageData(url) {
 		return new Promise((resolve, reject) => {
@@ -849,18 +895,24 @@
 		const fs = getPresetFs(ask);
 		for (const kind in KINDS) {
 			const list = [];
+			const folders = [];
 			if (fs) {
 				const dir = presetFolder(kind);
-				let files = [];
-				try { files = fs.readdirSync(dir).filter(f => /\.png$/i.test(f)).sort(); } catch (e) {}
-				for (const file of files) {
-					const b64 = fs.readFileSync(path.join(dir, file), 'base64');
-					list.push(await makePreset(kind, file.replace(/\.png$/i, ''), 'data:image/png;base64,' + b64));
+				const files = [];
+				listPresetFiles(fs, dir, '', 1, files, folders);
+				for (const name of files) {
+					const b64 = fs.readFileSync(path.join(dir, ...name.split('/')) + '.png', 'base64');
+					list.push(await makePreset(kind, name, 'data:image/png;base64,' + b64));
 				}
 			} else if (!isApp) {
-				for (const p of readWebPresets(kind)) list.push(await makePreset(kind, p.name, p.data));
+				for (const p of readWebPresets(kind)) {
+					list.push(await makePreset(kind, p.name, p.data));
+					if (folderOf(p.name) && !folders.includes(folderOf(p.name))) folders.push(folderOf(p.name));
+				}
+				folders.sort();
 			}
 			presets[kind] = list;
+			presetFolders[kind] = folders;
 			const key = KINDS[kind].setting;
 			if (settings[key] && !list.find(p => p.name === settings[key])) settings[key] = '';
 		}
@@ -869,14 +921,16 @@
 	}
 
 	function savePresetImage(kind, name, dataUrl) {
-		name = String(name).replace(/[\\/:*?"<>|]/g, '').trim();
+		name = cleanPresetPath(name);
 		if (!name) return null;
 		const fs = getPresetFs(true);
 		if (fs) {
 			const b64 = dataUrl.split(',')[1];
 			const bin = atob(b64), bytes = new Uint8Array(bin.length);
 			for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-			fs.writeFileSync(path.join(presetFolder(kind), name + '.png'), bytes);
+			const file = path.join(presetFolder(kind), ...name.split('/')) + '.png';
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, bytes);
 		} else if (!isApp) {
 			const list = readWebPresets(kind).filter(p => p.name !== name);
 			list.push({ name, data: dataUrl });
@@ -893,7 +947,7 @@
 	function deletePreset(kind, name) {
 		const fs = getPresetFs(true);
 		if (fs) {
-			try { fs.unlinkSync(path.join(presetFolder(kind), name + '.png')); } catch (e) {}
+			try { fs.unlinkSync(path.join(presetFolder(kind), ...name.split('/')) + '.png'); } catch (e) {}
 		} else if (!isApp) {
 			try { localStorage.setItem(webKey(kind), JSON.stringify(readWebPresets(kind).filter(p => p.name !== name))); } catch (e) {}
 		}
@@ -903,6 +957,39 @@
 		reloadPresets(false);
 	}
 
+	// The folder new presets go to unless picked otherwise: the last one used, per brush.
+	const lastFolder = { edge: '', highlight: '', shadow: '', noise: '' };
+
+	/**
+	 * Asks where to save a preset: its name (when `name` is given) and which
+	 * folder of the brush's presets, with an option to make a new folder.
+	 * Calls back with the folder path and the name.
+	 */
+	function askPresetPlace(kind, title, name, callback) {
+		const folders = presetFolders[kind];
+		const current = folderOf(selectedPresetName(kind));
+		const start = folders.includes(lastFolder[kind]) ? lastFolder[kind] : folders.includes(current) ? current : '';
+		const options = { '': 'No folder' };
+		for (const f of folders) options[f] = f;
+		options['__new__'] = 'New folder…';
+		const form = {};
+		if (name !== null) form.name = { label: 'Name', type: 'text', value: name };
+		form.folder = { label: 'Folder', type: 'select', options, value: start };
+		form.new_folder = { label: 'New folder', type: 'text', value: '', placeholder: 'stone or stone/rough',
+			condition: (result) => result.folder === '__new__' };
+		new Dialog({
+			id: 'edge_noise_preset_place',
+			title,
+			width: 400,
+			form,
+			onConfirm(result) {
+				const folder = cleanPresetPath(result.folder === '__new__' ? result.new_folder : result.folder);
+				lastFolder[kind] = folder;
+				callback(folder, result.name);
+			}
+		}).show();
+	}
+
 	function importPresets(kind) {
 		Blockbench.import({
 			resource_id: 'edge_noise_preset',
@@ -910,14 +997,29 @@
 			type: KINDS[kind].title,
 			readtype: 'image',
 			multiple: true
-		}, async (files) => {
-			let last = null;
-			for (const file of files) {
-				last = savePresetImage(kind, file.name.replace(/\.png$/i, ''), file.content) || last;
-			}
-			await reloadPresets(false);
-			if (last) selectPreset(kind, last);
+		}, (files) => {
+			askPresetPlace(kind, `Add ${files.length === 1 ? 'preset' : files.length + ' presets'} to`, null, async (folder) => {
+				let last = null;
+				for (const file of files) {
+					const name = file.name.replace(/\.png$/i, '');
+					last = savePresetImage(kind, folder ? folder + '/' + name : name, file.content) || last;
+				}
+				await reloadPresets(false);
+				if (last) selectPreset(kind, last);
+			});
 		});
+	}
+
+	/** Makes an empty folder for a brush's presets. */
+	function createPresetFolder(kind) {
+		Blockbench.textPrompt('New preset folder', '', async (value) => {
+			const folder = cleanPresetPath(value);
+			const fs = getPresetFs(true);
+			if (!folder || !fs) return;
+			fs.mkdirSync(path.join(presetFolder(kind), ...folder.split('/')), { recursive: true });
+			lastFolder[kind] = folder;
+			await reloadPresets(false);
+		}, { placeholder: 'stone or stone/rough' });
 	}
 
 	/** The area of the texture selected with the selection tool, or null. */
@@ -945,8 +1047,11 @@
 		}
 		const base = texture.name.replace(/\.png$/i, '') + (rect ? '_area' : '');
 		const what = KINDS[kind].title.toLowerCase();
-		Blockbench.textPrompt(rect ? `New ${what} from selected area (${rect.w}×${rect.h})` : `New ${what} from whole texture`, base, async (name) => {
-			const saved = savePresetImage(kind, name, canvas.toDataURL('image/png'));
+		const title = rect ? `New ${what} from selected area (${rect.w}×${rect.h})` : `New ${what} from whole texture`;
+		askPresetPlace(kind, title, base, async (folder, name) => {
+			name = cleanPresetPath(name);
+			if (!name) return;
+			const saved = savePresetImage(kind, folder ? folder + '/' + name : name, canvas.toDataURL('image/png'));
 			await reloadPresets(false);
 			if (saved) selectPreset(kind, saved);
 		});
@@ -1280,6 +1385,16 @@
 				vue.builtin = KINDS[kind].builtin;
 				vue.builtin_icon = KINDS[kind].builtin_icon;
 				vue.presets = presets[kind].map(p => ({ name: p.name, url: p.url, error: p.error }));
+				// presets grouped by folder: loose ones first, then each folder, empty ones too
+				const groups = [{ folder: '', items: [] }];
+				for (const f of presetFolders[kind]) groups.push({ folder: f, items: [] });
+				for (const p of presets[kind]) {
+					const f = folderOf(p.name);
+					let g = groups.find(g => g.folder === f);
+					if (!g) { g = { folder: f, items: [] }; groups.push(g); }
+					g.items.push({ name: p.name, label: baseName(p.name), url: p.url, error: p.error });
+				}
+				vue.groups = groups;
 				vue.selected = name;
 				vue.options = presetOptions(kind, p ? name : '');
 				vue.preview_url = p ? p.url : '';
@@ -1366,6 +1481,8 @@
 						builtin: '',
 						builtin_icon: '',
 						presets: [],
+						groups: [],
+						collapsed: {},
 						selected: '',
 						options: {},
 						preview_url: '',
@@ -1396,6 +1513,11 @@
 					importPresets() { importPresets(this.mode); },
 					saveTextureAsPreset() { saveTextureAsPreset(this.mode); },
 					openPresetFolder() { openPresetFolder(this.mode); },
+					createPresetFolder() { createPresetFolder(this.mode); },
+					toggleFolder(folder) {
+						this.collapsed = Object.assign({}, this.collapsed, { [this.mode + '/' + folder]: !this.collapsed[this.mode + '/' + folder] });
+					},
+					isCollapsed(folder) { return !!this.collapsed[this.mode + '/' + folder]; },
 					reload() { reloadPresets(true); },
 					openSettings,
 					refresh() { refreshPanel(); },
@@ -1408,6 +1530,7 @@
 							<div class="edge_noise_bar">
 								<div class="tool" title="Add presets from PNG files" @click="importPresets()"><i class="material-icons">add_photo_alternate</i></div>
 								<div class="tool" title="New preset from the selected area of the texture (the whole texture if nothing is selected)" @click="saveTextureAsPreset()"><i class="material-icons">highlight_alt</i></div>
+								<div class="tool" v-if="is_app" title="New folder for presets" @click="createPresetFolder()"><i class="material-icons">create_new_folder</i></div>
 								<div class="tool" v-if="is_app" title="Open preset folder" @click="openPresetFolder()"><i class="material-icons">folder_open</i></div>
 								<div class="tool" title="Reload presets" @click="reload()"><i class="material-icons">refresh</i></div>
 								<div class="tool" v-if="mode !== 'noise'" title="Brush settings" @click="openSettings()"><i class="material-icons">tune</i></div>
@@ -1416,10 +1539,18 @@
 								<li :class="{selected: selected === ''}" @click="select('')">
 									<i class="material-icons">{{ builtin_icon }}</i><span>{{ builtin }}</span>
 								</li>
-								<li v-for="p in presets" :key="p.name" :class="{selected: selected === p.name, broken: !!p.error}" @click="select(p.name)" :title="p.error || p.name">
-									<img :src="p.url"><span>{{ p.name }}</span>
-									<i class="material-icons edge_noise_delete" title="Delete preset" @click.stop="remove(p.name)">delete</i>
-								</li>
+								<template v-for="g in groups">
+									<li v-if="g.folder" :key="'folder:' + g.folder" class="edge_noise_folder" @click="toggleFolder(g.folder)" :title="isCollapsed(g.folder) ? 'Show presets' : 'Hide presets'">
+										<i class="material-icons">{{ isCollapsed(g.folder) ? 'folder' : 'folder_open' }}</i><span>{{ g.folder }}</span>
+										<span class="edge_noise_count">{{ g.items.length }}</span>
+									</li>
+									<template v-if="!g.folder || !isCollapsed(g.folder)">
+										<li v-for="p in g.items" :key="p.name" :class="{selected: selected === p.name, broken: !!p.error, nested: !!g.folder}" @click="select(p.name)" :title="p.error || p.name">
+											<img :src="p.url"><span>{{ p.label }}</span>
+											<i class="material-icons edge_noise_delete" title="Delete preset" @click.stop="remove(p.name)">delete</i>
+										</li>
+									</template>
+								</template>
 							</ul>
 							<p class="edge_noise_hint" v-if="!presets.length && mode === 'edge'">
 								No presets yet. Select an area of a texture showing the edge you want and click the selection button above, or add a PNG with a bright side and a dark side.
@@ -1546,6 +1677,9 @@
 		.edge_noise_list li img { width: 24px; height: 24px; object-fit: contain; image-rendering: pixelated; flex-shrink: 0; }
 		.edge_noise_list li > i:first-child { width: 24px; text-align: center; }
 		.edge_noise_list li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.edge_noise_list li.nested { padding-left: 22px; }
+		.edge_noise_folder { color: var(--color-subtle_text); }
+		.edge_noise_count { flex: 0 0 auto !important; font-size: 0.85em; opacity: 0.7; }
 		.edge_noise_delete { opacity: 0; }
 		.edge_noise_list li:hover .edge_noise_delete { opacity: 0.7; }
 		.edge_noise_panel label { display: flex; align-items: center; gap: 4px; margin-top: 6px; color: var(--color-subtle_text); }
@@ -1636,7 +1770,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.8.0',
+		version: '0.9.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
