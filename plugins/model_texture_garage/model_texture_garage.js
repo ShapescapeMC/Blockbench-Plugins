@@ -61,7 +61,8 @@
 			grid_follow_model: true, // line cells up with the model's block grid rather than the texture's corner
 			grid_show: true,      // draw the block grid on the model while the Block Grid Brush is selected
 			grid_show_modes: {},  // the same for the other brushes: mode -> true to show it there too
-			edge_on_grid: false   // Edge Noise Brush: only break up the block-grid line nearest the brush
+			edge_on_grid: false,  // Edge Noise Brush: only break up the block-grid line nearest the brush
+			edge_line_place: 'center' // where the noise sits on that line: 'center', 'inner' (the block painted in) or 'outer' (the block next to it)
 		};
 		const STORAGE_KEY = 'edge_noise_brush_settings';
 		const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -910,6 +911,25 @@
 		}
 
 		/**
+		 * Whether a pixel at signed distance d from a block line (d > 0 inside the
+		 * block being painted, d < 0 in the block next to it, in pixels from the
+		 * line to the pixel's centre) is in the band the noise may change.
+		 * place: 'center' (both sides), 'inner' or 'outer'.
+		 */
+		function inLineBand(d, reach, place) {
+			if (place === 'inner') return d > 0 && d <= reach;
+			if (place === 'outer') return d < 0 && -d <= reach;
+			return Math.abs(d) <= reach;
+		}
+
+		/** The band of inLineBand as pixel positions [lo, hi] across the line at pos. */
+		function lineBandPixels(pos, side, reach, place) {
+			if (place === 'inner') return side > 0 ? [pos, pos + reach] : [pos - reach, pos];
+			if (place === 'outer') return side > 0 ? [pos - reach, pos] : [pos, pos + reach];
+			return [pos - reach, pos + reach];
+		}
+
+		/**
 		 * The cells to fill for a brush dab at (x, y) of size `size`, given the grid
 		 * along each axis ({ anchor, cell }). Returns [{ x, y, w, h, key }].
 		 */
@@ -926,7 +946,7 @@
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { faceGridAxis, facePixelToModel, nearestGridLine, gridCells, gridLines, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS });
+			Object.assign(module.exports, { inLineBand, lineBandPixels, faceGridAxis, facePixelToModel, nearestGridLine, gridCells, gridLines, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -1456,11 +1476,10 @@
 				updateGridLine(opts);
 				const line = cache.gridLine;
 				if (!line) return px;
-				// only the band along the line that the steps can reach
-				const reach = (cache.preset ? cache.preset.height * Math.max(1, Number(cache.presetOpt && cache.presetOpt.depth) || 1)
-					: Math.max(1, settings.step_depth | 0)) * (1 + cache.passes[i]);
-				const d = (line.axis === 'x' ? x : y) + 0.5 - line.pos;
-				if (Math.abs(d) > reach) return px;
+				// only the band along the line that the steps can reach, on the chosen side of it
+				const reach = lineReach() * (1 + cache.passes[i]);
+				const d = ((line.axis === 'x' ? x : y) + 0.5 - line.pos) * cache.gridSide;   // > 0: inside the block painted in
+				if (!inLineBand(d, reach, settings.edge_line_place)) return px;
 			}
 			if (isNewPass(i) && settings.grow_on_repeat) {
 				cache.passes[i] = Math.min(Math.max(0, settings.max_growth | 0), cache.passes[i] + 1);
@@ -1481,10 +1500,30 @@
 			const only = cache.dir === 'h' ? 'y' : cache.dir === 'v' ? 'x' : (cache.gridLine ? cache.gridLine.axis : null);
 			const line = nearestGridLine(opts.x, opts.y, grid, only);
 			const prev = cache.gridLine;
+			const across = line.axis === 'x' ? opts.x : opts.y, along = line.axis === 'x' ? opts.y : opts.x;
 			if (!prev || prev.axis !== line.axis || prev.pos !== line.pos) {
 				cache.gridLine = line;
-				markGridLine(line, cache.texture);
+				// which side of the line is "inside": the block the brush is in when the line is picked
+				cache.gridSide = across + 0.5 >= line.pos ? 1 : -1;
 			}
+			// the block along the line the brush is next to
+			const g = grid[line.axis === 'x' ? 'y' : 'x'];
+			const segment = Math.floor((along + 0.5 - g.anchor) / g.cell);
+			const key = line.axis + line.pos + '/' + cache.gridSide + '/' + segment;
+			if (key !== cache.gridMarkKey) {
+				cache.gridMarkKey = key;
+				markGridLine(line, cache.texture, {
+					side: cache.gridSide,
+					from: g.anchor + segment * g.cell, to: g.anchor + (segment + 1) * g.cell,
+					reach: lineReach()
+				});
+			}
+		}
+
+		/** How far the edge steps reach from the line, in pixels, before any growth. */
+		function lineReach() {
+			return cache.preset ? cache.preset.height * Math.max(1, Number(cache.presetOpt && cache.presetOpt.depth) || 1)
+				: Math.max(1, settings.step_depth | 0);
 		}
 
 		function noisePixel(x, y, px, alpha, opts) {
@@ -1641,7 +1680,8 @@
 				vue.grid = {
 					size: String(settings.grid_size), follow: settings.grid_follow_model, show: settings.grid_show,
 					show_here: !!settings.grid_show_modes[mode],
-					edge_on_grid: settings.edge_on_grid
+					edge_on_grid: settings.edge_on_grid,
+					edge_line_place: settings.edge_line_place
 				};
 				if (!mode || mode === 'grid') return;
 				try {
@@ -1860,6 +1900,7 @@
 			if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
 			if (key === 'grid_show') settings.grid_show = !!value;
 			if (key === 'edge_on_grid') { settings.edge_on_grid = !!value; clearCache(); if (!value) clearLineMarker(); }
+			if (key === 'edge_line_place' && ['center', 'inner', 'outer'].includes(value)) { settings.edge_line_place = value; clearCache(); clearLineMarker(); }
 			if (key === 'grid_show_here' && activeMode) settings.grid_show_modes = Object.assign({}, settings.grid_show_modes, { [activeMode]: !!value });
 			saveSettings();
 			refreshPanel();
@@ -1956,25 +1997,38 @@
 		}
 
 		/** Highlights the chosen block line on the face being painted, across the whole face. */
-		function markGridLine(line, texture) {
+		/**
+		 * Highlights where the noise goes: the stretch of the chosen line beside
+		 * the block the brush is in, as wide as the band the steps can reach on
+		 * the chosen side. band: { side, from, to, reach } in texture pixels.
+		 */
+		function markGridLine(line, texture, band) {
 			clearLineMarker();
-			if (typeof THREE === 'undefined' || !texture) return;
+			if (typeof THREE === 'undefined' || !texture || !band) return;
 			const cube = Painter.current && Painter.current.element;
 			const faceKey = Painter.current && Painter.current.face;
 			const face = cube && cube.faces && cube.faces[faceKey];
 			const plane = FACE_PLANES[faceKey];
 			if (!face || !cube.mesh || !plane || !cube.from || !(face.rotation === 0 || face.rotation === 180 || !face.rotation)) return;
 			const fx = texture.width / texture.getUVWidth(), fy = texture.display_height / texture.getUVHeight();
-			const uvAxis = line.axis === 'x' ? 'u' : 'v';
-			const at = facePixelToModel(cube, faceKey, face.uv, uvAxis, line.pos, uvAxis === 'u' ? fx : fy, face.rotation === 180);
-			if (!at) return;
+			const turned = face.rotation === 180;
+			const acrossUV = line.axis === 'x' ? 'u' : 'v', alongUV = line.axis === 'x' ? 'v' : 'u';
+			const factor = (uv) => uv === 'u' ? fx : fy;
+			const model = (uv, px) => facePixelToModel(cube, faceKey, face.uv, uv, px, factor(uv), turned);
+			// the band across the line, in pixels, for where the noise sits
+			const [b0, b1] = lineBandPixels(line.pos, band.side, band.reach, settings.edge_line_place);
+			const a0 = model(acrossUV, b0), a1 = model(acrossUV, b1);
+			const l0 = model(alongUV, band.from), l1 = model(alongUV, band.to);
+			if (!a0 || !a1 || !l0 || !l1) return;
 			const [n, end, out] = plane;
-			const other = [0, 1, 2].find(a => a !== n && a !== at.axis);
+			const clampTo = (axis, v) => Math.max(cube.from[axis], Math.min(cube.to[axis], v));
 			const size = [0, 0, 0], centre = [0, 0, 0];
-			size[at.axis] = 0.35; centre[at.axis] = at.value;
-			size[other] = cube.to[other] - cube.from[other]; centre[other] = (cube.to[other] + cube.from[other]) / 2;
+			const acrossLo = Math.min(a0.value, a1.value), acrossHi = Math.max(a0.value, a1.value);
+			size[a0.axis] = Math.max(0.35, acrossHi - acrossLo); centre[a0.axis] = (acrossLo + acrossHi) / 2;
+			const alongLo = clampTo(l0.axis, Math.min(l0.value, l1.value)), alongHi = clampTo(l0.axis, Math.max(l0.value, l1.value));
+			size[l0.axis] = Math.max(0.35, alongHi - alongLo); centre[l0.axis] = (alongLo + alongHi) / 2;
 			size[n] = 0.06; centre[n] = cube[end][n] + out * 0.05;
-			if (!markerMaterial) markerMaterial = new THREE.MeshBasicMaterial({ color: MARKER_COLOR });
+			if (!markerMaterial) markerMaterial = new THREE.MeshBasicMaterial({ color: MARKER_COLOR, transparent: true, opacity: 0.7 });
 			lineMarker = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), markerMaterial);
 			lineMarker.name = 'edge_noise_block_line';
 			lineMarker.position.set(centre[0] - cube.origin[0], centre[1] - cube.origin[1], centre[2] - cube.origin[2]);
@@ -2199,7 +2253,7 @@
 							texture_too_large: false,
 							noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
 							grow_mode: 'brush',
-							grid: { size: '16', follow: true, show: true, show_here: false, edge_on_grid: false }
+							grid: { size: '16', follow: true, show: true, show_here: false, edge_on_grid: false, edge_line_place: 'center' }
 						};
 					},
 					computed: {
@@ -2305,6 +2359,14 @@
 								<div class="edge_noise_slider" v-if="mode === 'edge'" title="Only break up the block-grid line nearest the brush, in a band along it. The line is highlighted on the model while you paint.">
 									<span>On block lines</span>
 									<input type="checkbox" :checked="grid.edge_on_grid" @change="setGrid('edge_on_grid', $event.target.checked)">
+								</div>
+								<div class="edge_noise_slider" v-if="mode === 'edge' && grid.edge_on_grid" title="Where the noise goes on the line: on both sides of it, only inside the block you are painting in, or only in the block next to it. The highlight on the model shows the band.">
+									<span>Noise sits</span>
+									<select :value="grid.edge_line_place" @change="setGrid('edge_line_place', $event.target.value)">
+										<option value="outer">Outer edge</option>
+										<option value="center">Centred</option>
+										<option value="inner">Inner edge</option>
+									</select>
 								</div>
 								<div class="edge_noise_slider" v-if="mode === 'edge'" title="Which tone the brush grows into its neighbour.">
 									<span>Grows</span>
@@ -2904,7 +2966,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.0.0',
+		version: '1.1.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

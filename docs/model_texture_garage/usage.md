@@ -16,7 +16,15 @@ Painting away from any edge does nothing, since there is nothing to break up.
 
 ### On block lines
 
-Tick `On block lines` in the panel to break up only the seams between blocks. The brush then picks the block-grid line nearest to where you paint and only changes a band along it, as wide as the steps can reach, so the rest of each block keeps its edges as they are. A sideways stroke follows the line running across, an up-and-down stroke the line running up and down, and at the start of a stroke the nearest line wins. The chosen line is highlighted in yellow on the model, across the whole face, so you can see which seam you are on. The block grid shows while the option is on, and `Block size` below it sets the spacing, shared with the Block Grid Brush.
+Tick `On block lines` in the panel to break up only the seams between blocks. The brush then picks the block-grid line nearest to where you paint and only changes a band along it, as wide as the steps can reach, so the rest of each block keeps its edges as they are. A sideways stroke follows the line running across, an up-and-down stroke the line running up and down, and at the start of a stroke the nearest line wins. The part of the line you are on is highlighted in yellow on the model: just the stretch beside the block the brush is in, as wide as the band the noise can change, so you can see where the noise will go.
+
+`Noise sits` decides which side of the line the noise goes:
+
+- `Outer edge`: only in the block next to the one you are painting in.
+- `Centred`: on both sides of the line.
+- `Inner edge`: only inside the block you are painting in.
+
+The block you are painting in is the one the brush is over when the stroke picks the line, so start the stroke on the side you mean. The block grid shows while the option is on, and `Block size` below it sets the spacing, shared with the Block Grid Brush.
 
 The seam needs two different tones on either side to break up, as with any edge: paint the blocks in different colours first, for example with the Block Grid Brush.
 
