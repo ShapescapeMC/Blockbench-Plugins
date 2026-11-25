@@ -10,10 +10,10 @@ This plugin renders the model you have open into finished images and GIFs: still
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
-### Edge Noise Brush
-This plugin adds four modes to the Brush tool for pixel art edges and surfaces. The Edge Noise Brush breaks up straight edges between two tones into pixel steps, using only the colours already on either side. The Highlight and Shadow Brushes then draw lines along those edges, following every step. The Noise Brush scatters the brush colour over a surface. The edge, highlight and shadow patterns come from presets you make from areas of your own textures, each with its own thickness and length.
+### Model & Texture Garage
+This plugin gathers tools for pixel art models built from blocks. Brushes break edges into steps, draw highlights and shadows along them, scatter noise and fill block cells, all following presets you make from your own textures, and a reference panel lets you pick colours from a zoomed view. In the Edit tab, a Block Grid Cube tool adds and cuts out cubes on the model's block grid, named for your build script.
 
-[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/edge_noise_brush/about.html)
+[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/model_texture_garage/about.html)
 
 ### System Template File Loader
 This plugin allows for easy importing of PNG and animation files into a project when the geometry file is located in the same directory as the other files. For example, when using a custom folder structure in the Regolith filter system template. It can currently read files from the same directory or from subdirectories.
