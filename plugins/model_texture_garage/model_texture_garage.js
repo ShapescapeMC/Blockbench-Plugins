@@ -2691,7 +2691,8 @@
 			cutout_name: 'CUTOUT',  // name given to cubes made in Cut out mode
 			hollow_name: 'HOLLOW',  // name given to cubes made in Hollow mode
 			cutout_inflate: 0.025,  // how much cut-out and hollow cubes are inflated
-			x_toggles: true         // X switches between Add and Cut out while the tool is held
+			x_toggles: true,        // X switches between Add and Cut out while the tool is held
+			drag_draw: true         // hold the mouse and drag to place a line of cubes
 		};
 		const STORAGE_KEY = 'block_grid_modeler_settings';
 		const SIZES = [4, 8, 16, 32, 64];
@@ -2738,13 +2739,29 @@
 			return { from, to };
 		}
 
+		/**
+		 * The cells from cell a to cell b (both { from }), one step at a time, so
+		 * a fast drag still leaves a line with no gaps. Cells are `size` apart;
+		 * the axis `fixed` (the layer being drawn on) is left as it is in a.
+		 * Returns a list of `from` corners, without a, ending with b.
+		 */
+		function cellsBetween(a, b, size, fixed) {
+			const steps = [0, 1, 2].map(i => i === fixed ? 0 : Math.round((b[i] - a[i]) / size));
+			const n = Math.max(Math.abs(steps[0]), Math.abs(steps[1]), Math.abs(steps[2]));
+			const out = [];
+			for (let k = 1; k <= n; k++) {
+				out.push([0, 1, 2].map(i => i === fixed ? a[i] : a[i] + Math.round(steps[i] * k / n) * size));
+			}
+			return out;
+		}
+
 		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
 		function toggledMode(mode) {
 			return mode === 'add' ? 'cutout' : 'add';
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -2852,18 +2869,16 @@
 				&& c.to.every((v, i) => Math.abs(v - to[i]) < 1e-6));
 		}
 
-		function placeCube(hit) {
-			const cell = cellFor(hit);
+		/**
+		 * Makes one cube in the cell for the current mode, next to the cube `source`
+		 * that was clicked, without an undo step of its own. Returns it, or null if
+		 * the same cube is already there.
+		 */
+		function makeCube(cell, source, faceKey) {
 			const mode = MODES[settings.mode];
 			const name = nameFor(settings.mode);
-			if (sameCubeExists(name, cell.from, cell.to)) {
-				Blockbench.showQuickMessage(`${name} cube is already there`);
-				return;
-			}
-			const source = hit.cube;
+			if (sameCubeExists(name, cell.from, cell.to)) return null;
 			const parent = source.parent instanceof Group ? source.parent : null;
-
-			Undo.initEdit({ outliner: true, elements: [], selection: true });
 			const cube = new Cube({
 				name,
 				from: cell.from.slice(),
@@ -2879,18 +2894,90 @@
 				cube.scope = parent.scope;
 			}
 			// same texture as the face clicked on, on every face
-			const texture = source.faces[hit.face] && source.faces[hit.face].texture;
+			const texture = source.faces[faceKey] && source.faces[faceKey].texture;
 			for (const key in cube.faces) {
 				if (texture !== undefined) cube.faces[key].texture = texture;
 			}
 			if (!cube.box_uv) cube.mapAutoUV();
+			Canvas.updateView({ elements: [cube], element_aspects: { transform: true, geometry: true, faces: true } });
+			return cube;
+		}
 
+		/*
+		 * A placing stroke: pressing on a face places the first cube; with
+		 * "Hold to draw" on, dragging keeps placing cubes on the same layer as
+		 * the first one (the same depth along the face's direction), filling any
+		 * gaps, until the mouse is let go. The whole stroke is one undo step.
+		 */
+		let stroke = null;
+
+		function startStroke(hit) {
+			const cell = cellFor(hit);
+			const axis = hit.normal.findIndex(v => v !== 0);
+			Undo.initEdit({ outliner: true, elements: [], selection: true });
+			stroke = { source: hit.cube, face: hit.face, normal: hit.normal.join(','), axis, layer: cell.from[axis], last: cell.from.slice(), cubes: [] };
+			const cube = makeCube(cell, hit.cube, hit.face);
+			if (cube) stroke.cubes.push(cube);
+			else Blockbench.showQuickMessage(`${nameFor(settings.mode)} cube is already there`);
+			window.addEventListener('mouseup', endStroke, true);
+			if (!settings.drag_draw) endStroke();
+		}
+
+		function continueStroke(hit) {
+			if (!stroke || !hit || hit.normal.join(',') !== stroke.normal) return;
+			const size = Number(settings.size) || 16;
+			const cell = cellFor(hit);
+			// stay on the layer the stroke started on
+			cell.from[stroke.axis] = stroke.layer;
+			if (cell.from.every((v, i) => v === stroke.last[i])) return;
+			for (const from of cellsBetween(stroke.last, cell.from, size, stroke.axis)) {
+				const cube = makeCube({ from, to: from.map(v => v + size) }, stroke.source, stroke.face);
+				if (cube) stroke.cubes.push(cube);
+			}
+			stroke.last = cell.from.slice();
+		}
+
+		function endStroke() {
+			window.removeEventListener('mouseup', endStroke, true);
+			if (!stroke) return;
+			const { cubes } = stroke;
+			stroke = null;
+			if (!cubes.length) {
+				if (typeof Undo.cancelEdit === 'function') Undo.cancelEdit(false);
+				return;
+			}
 			unselectAllElements();
-			cube.select();
-			Canvas.updateView({ elements: [cube], element_aspects: { transform: true, geometry: true, faces: true }, selection: true });
-			Undo.finishEdit(mode.undo, { outliner: true, elements: [cube], selection: true });
-			Blockbench.dispatchEvent('add_cube', { object: cube });
+			cubes.forEach(c => c.select());
+			Canvas.updateView({ elements: cubes, selection: true });
+			const mode = MODES[settings.mode];
+			Undo.finishEdit(cubes.length === 1 ? mode.undo : `${mode.undo} ×${cubes.length}`, { outliner: true, elements: cubes, selection: true });
+			cubes.forEach(cube => Blockbench.dispatchEvent('add_cube', { object: cube }));
 			syncPanel();
+		}
+
+		/**
+		 * Puts the tool in the toolbox exactly once. Blockbench remembers the
+		 * toolbox by tool name, and another copy of this tool (an older version,
+		 * or the separate Block Grid Modeler plugin) can leave entries behind, so
+		 * every entry with this name is removed first, keeping the place of the
+		 * first one.
+		 */
+		function addToToolboxOnce(t) {
+			if (typeof Toolbox === 'undefined' || !Toolbox.children) return;
+			let place = -1;
+			for (let i = Toolbox.children.length - 1; i >= 0; i--) {
+				const item = Toolbox.children[i];
+				const id = typeof item === 'string' ? item : item && item.id;
+				if (id !== t.id) continue;
+				place = i;
+				if (item && typeof item === 'object' && item !== t && Array.isArray(item.toolbars)) {
+					const j = item.toolbars.indexOf(Toolbox);
+					if (j >= 0) item.toolbars.splice(j, 1);
+				}
+				Toolbox.children.splice(i, 1);
+			}
+			if (Toolbox.postload) Toolbox.postload = Toolbox.postload.filter(entry => entry[0] !== t.id);
+			try { Toolbox.add(t, place >= 0 ? place : undefined); } catch (e) {}
 		}
 
 		/* --- X key --- */
@@ -2931,6 +3018,7 @@
 			vue.names = { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name };
 			vue.inflate = settings.cutout_inflate;
 			vue.x_toggles = settings.x_toggles;
+			vue.drag_draw = settings.drag_draw;
 			try { vue.counts = countByName(); } catch (e) {}
 		}
 
@@ -2958,6 +3046,7 @@
 							names: { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name },
 							inflate: settings.cutout_inflate,
 							x_toggles: settings.x_toggles,
+							drag_draw: settings.drag_draw,
 							counts: { add: 0, cutout: 0, hollow: 0 }
 						};
 					},
@@ -2979,6 +3068,11 @@
 						},
 						setToggle(value) {
 							settings.x_toggles = !!value;
+							saveSettings();
+							syncPanel();
+						},
+						setDrag(value) {
+							settings.drag_draw = !!value;
 							saveSettings();
 							syncPanel();
 						}
@@ -3015,6 +3109,10 @@
 								<input type="checkbox" :checked="x_toggles" @change="setToggle($event.target.checked)">
 								<span>X switches Add and Cut out</span>
 							</div>
+							<div class="bgc_row" title="Hold the mouse and drag across faces to place a line of cubes on the same layer as the first one.">
+								<input type="checkbox" :checked="drag_draw" @change="setDrag($event.target.checked)">
+								<span>Hold to draw a line of cubes</span>
+							</div>
 						</div>
 					`
 				}
@@ -3034,6 +3132,7 @@
 					hollow_name: { label: 'Name for hollow cubes', type: 'text', value: settings.hollow_name },
 					cutout_inflate: { label: 'Inflate (cut out, hollow)', type: 'number', value: settings.cutout_inflate, step: 0.005, min: 0, max: 1 },
 					x_toggles: { label: 'X switches Add and Cut out', type: 'checkbox', value: settings.x_toggles },
+					drag_draw: { label: 'Hold to draw a line of cubes', type: 'checkbox', value: settings.drag_draw },
 					_info: { type: 'info', text: 'Names are always written in capitals. Change them to whatever your build script looks for.' }
 				},
 				onConfirm(result) {
@@ -3042,6 +3141,7 @@
 					}
 					settings.cutout_inflate = Math.max(0, Number(result.cutout_inflate) || 0);
 					settings.x_toggles = !!result.x_toggles;
+					settings.drag_draw = !!result.drag_draw;
 					saveSettings();
 					syncPanel();
 				}
@@ -3100,11 +3200,13 @@
 					allowWireframe: true,
 					modes: ['edit'],
 					onCanvasMouseMove(data) {
-						showPreview(hitOnCube(data));
+						const hit = hitOnCube(data);
+						if (stroke) continueStroke(hit);
+						showPreview(hit);
 					},
 					onCanvasClick(data) {
 						const hit = hitOnCube(data);
-						if (hit) placeCube(hit);
+						if (hit) startStroke(hit);
 					},
 					onSelect() {
 						modeSelect.set(settings.mode);
@@ -3119,7 +3221,7 @@
 						setTimeout(() => { if (typeof updateInterfacePanels === 'function') updateInterfacePanels(); }, 0);
 					}
 				});
-				try { Toolbox.add(tool); } catch (e) {}
+				addToToolboxOnce(tool);
 
 				createPanel();
 				window.addEventListener('keydown', onKeyDown, true);
@@ -3136,6 +3238,8 @@
 			},
 			onunload() {
 				window.removeEventListener('keydown', onKeyDown, true);
+				window.removeEventListener('mouseup', endStroke, true);
+				stroke = null;
 				listeners.forEach(l => l && l.delete && l.delete());
 				listeners.length = 0;
 				clearPreview();
@@ -3159,7 +3263,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.2.0',
+		version: '1.3.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

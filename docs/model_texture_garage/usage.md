@@ -204,7 +204,9 @@ Cells line up with the model on faces with their UV turned by 0 or 180 degrees. 
 
 ## Block Grid Cube tool
 
-Pick the `Block Grid Cube` tool in the Edit tab and move the mouse over the model. A wire box shows where the next cube will go, in the colour of the mode: green for Add, red for Cut out, blue for Hollow. Click to place it. Each click is one undo step.
+Pick the `Block Grid Cube` tool in the Edit tab and move the mouse over the model. A wire box shows where the next cube will go, in the colour of the mode: green for Add, red for Cut out, blue for Hollow. Click to place it.
+
+Hold the mouse and drag to draw a line of cubes. The stroke stays on the layer of the first cube: drag across the top of a wall and every cube lands on top of it, even where you pass over cubes you just placed. Moving quickly leaves no gaps, and the whole stroke is one undo step. Turn `Hold to draw a line of cubes` off in the panel to place one cube per click.
 
 While the tool is in hand, its panel shows on the right with everything you need while placing:
 
@@ -212,6 +214,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 - `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them.
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
+- `Hold to draw a line of cubes`: on by default, see above.
 
 The mode and the standard sizes are also in the tool bar at the top, and the names and inflate under `Tools -> Block Grid Cube Settings`.
 
@@ -232,3 +235,7 @@ Cubes snap to a grid of the chosen size laid over the model's block grid, so a 1
 - They go into the same bone as the cube you clicked, with the same pivot, so they move with it.
 - Every face gets the texture of the face you clicked, and the UV is laid out automatically, ready for a script to remap it.
 - Clicking a spot that already has a cube of the same name and size does nothing.
+
+```{note}
+If the toolbox shows the Block Grid Cube tool more than once, another copy of it is installed, such as the separate Block Grid Modeler plugin from before the two were combined. Uninstall that one. Model & Texture Garage also tidies up leftover toolbox entries when it loads, so after a restart there is one again.
+```
