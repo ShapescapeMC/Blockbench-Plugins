@@ -2738,6 +2738,7 @@
 		const DEFAULTS = {
 			mode: 'add',            // 'add', 'cutout' or 'hollow'
 			size: 16,               // cube size in model units, 16 = one block
+			grid: 'size',           // the grid cubes snap to: 4 to 64 units, or 'size' for the cube size
 			add_name: 'ADD',        // name given to cubes made in Add mode
 			cutout_name: 'CUTOUT',  // name given to cubes made in Cut out mode
 			hollow_name: 'HOLLOW',  // name given to cubes made in Hollow mode
@@ -2772,30 +2773,34 @@
 		}
 
 		/**
-		 * The grid cell to fill for a click at model point `point` on a face
-		 * facing `normal`: the cell just outside the face for 'add', just inside
-		 * it for 'cutout' and 'hollow'. Cells are `size` units wide, on the block
-		 * grid. For 'cutout' and 'hollow', when `facePlane` (where the clicked
-		 * face sits on its axis) is given, the cell starts at that face and
-		 * reaches `size` inwards, so its outer side is flush with the surface
-		 * clicked even where that is not on a block edge; along the surface it
-		 * stays on the grid. Returns { from, to }.
+		 * The cube to place for a click at model point `point` on a face facing
+		 * `normal`, `size` units on each side, snapped to a grid of `grid` units
+		 * laid over the model's block grid (the cube size when not given).
+		 *
+		 * Across the face, the cube is centred on the cursor as near as the grid
+		 * allows. In depth, 'add' places it against the face, outside; 'cutout'
+		 * and 'hollow' place it inside, its outer side on the face: on the face
+		 * itself when `facePlane` (where the clicked face sits on its axis) is
+		 * given, so it is flush even where the face is not on the grid, otherwise
+		 * on the grid line nearest the face. Returns { from, to }.
 		 */
-		function targetCell(point, normal, size, mode, centred, facePlane) {
+		function targetCell(point, normal, size, mode, centred, facePlane, grid) {
 			const off = gridOffset(centred);
+			const step = grid > 0 ? grid : size;
 			const inside = mode === 'cutout' || mode === 'hollow';
-			const side = inside ? -1 : 1;
+			const snap = (v, a) => Math.round((v - off[a]) / step) * step + off[a];
 			const from = [0, 0, 0], to = [0, 0, 0];
 			for (let a = 0; a < 3; a++) {
-				if (inside && normal[a] !== 0 && typeof facePlane === 'number') {
-					from[a] = normal[a] > 0 ? facePlane - size : facePlane;
+				if (normal[a] !== 0) {
+					const surface = inside && typeof facePlane === 'number' ? facePlane : snap(point[a], a);
+					const outward = normal[a] > 0;
+					// add builds out from the face, cut out and hollow reach in from it
+					if (inside === outward) { to[a] = surface; from[a] = surface - size; }
+					else { from[a] = surface; to[a] = surface + size; }
+				} else {
+					from[a] = snap(point[a] - size / 2, a);
 					to[a] = from[a] + size;
-					continue;
 				}
-				// step half a cell off the face, so the point lands inside the wanted cell
-				const q = point[a] + normal[a] * side * size / 2;
-				from[a] = Math.floor((q - off[a]) / size + 1e-9) * size + off[a];
-				to[a] = from[a] + size;
 			}
 			return { from, to };
 		}
@@ -2838,7 +2843,7 @@
 			try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) {}
 		}
 
-		let tool, modeSelect, sizeSelect, toolbar, settingsAction, styleNode, panel;
+		let tool, modeSelect, sizeSelect, gridSelect, toolbar, settingsAction, styleNode, panel;
 		let preview = null, previewMaterials = {};
 		const listeners = [];
 
@@ -2864,7 +2869,21 @@
 			// where the clicked face sits on its own axis: the top of the cube for 'up', and so on
 			const a = hit.normal.findIndex(v => v !== 0);
 			const facePlane = hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a];
-			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred, facePlane);
+			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred, facePlane, gridStep());
+		}
+
+		/** The grid step in model units: the chosen grid, or the cube size. */
+		function gridStep() {
+			return settings.grid === 'size' ? Number(settings.size) || 16 : Number(settings.grid) || Number(settings.size) || 16;
+		}
+
+		function setGrid(value) {
+			settings.grid = value === 'size' ? 'size' : (SIZES.includes(Number(value)) ? Number(value) : 'size');
+			saveSettings();
+			if (gridSelect && gridSelect.value !== String(settings.grid)) gridSelect.set(String(settings.grid));
+			clearPreview();
+			if (lastHover) showPreview(lastHover);
+			syncPanel();
 		}
 
 		/** Switches mode and keeps the tool bar, panel and preview in step. */
@@ -2979,7 +2998,7 @@
 			const cell = cellFor(hit);
 			const axis = hit.normal.findIndex(v => v !== 0);
 			Undo.initEdit({ outliner: true, elements: [], selection: true });
-			stroke = { source: hit.cube, face: hit.face, normal: hit.normal.join(','), axis, layer: cell.from[axis], last: cell.from.slice(), cubes: [] };
+			stroke = { source: hit.cube, face: hit.face, normal: hit.normal.join(','), axis, layer: cell.from[axis], start: cell.from.slice(), last: cell.from.slice(), cubes: [] };
 			const cube = makeCube(cell, hit.cube, hit.face);
 			if (cube) stroke.cubes.push(cube);
 			else Blockbench.showQuickMessage(`${nameFor(settings.mode)} cube is already there`);
@@ -2991,8 +3010,12 @@
 			if (!stroke || !hit || hit.normal.join(',') !== stroke.normal) return;
 			const size = Number(settings.size) || 16;
 			const cell = cellFor(hit);
-			// stay on the layer the stroke started on
+			// stay on the layer the stroke started on, and a whole cube apart from its first cube,
+			// so a grid finer than the cube does not leave overlaps or slivers along the line
 			cell.from[stroke.axis] = stroke.layer;
+			for (let i = 0; i < 3; i++) {
+				if (i !== stroke.axis) cell.from[i] = stroke.start[i] + Math.round((cell.from[i] - stroke.start[i]) / size) * size;
+			}
 			if (cell.from.every((v, i) => v === stroke.last[i])) return;
 			for (const from of cellsBetween(stroke.last, cell.from, size, stroke.axis)) {
 				const cube = makeCube({ from, to: from.map(v => v + size) }, stroke.source, stroke.face);
@@ -3079,6 +3102,7 @@
 			const vue = panel.vue;
 			vue.mode = settings.mode;
 			vue.size = Number(settings.size) || 16;
+			vue.grid = String(settings.grid);
 			vue.names = { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name };
 			vue.inflate = settings.cutout_inflate;
 			vue.x_toggles = settings.x_toggles;
@@ -3107,6 +3131,7 @@
 							sizes: SIZES,
 							mode: settings.mode,
 							size: Number(settings.size) || 16,
+							grid: String(settings.grid),
 							names: { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name },
 							inflate: settings.cutout_inflate,
 							x_toggles: settings.x_toggles,
@@ -3120,6 +3145,7 @@
 					methods: {
 						setMode(mode) { setMode(mode); },
 						setSize(size) { setSize(size); },
+						setGrid(value) { setGrid(value); },
 						setName(mode, value) {
 							settings[mode + '_name'] = String(value || DEFAULTS[mode + '_name']).toUpperCase().trim() || DEFAULTS[mode + '_name'];
 							saveSettings();
@@ -3155,6 +3181,12 @@
 							<div class="bgc_buttons">
 								<div v-for="s in sizes" :key="s" class="bgc_button bgc_size" :class="{selected: size === s}" @click="setSize(s)">{{ s }}</div>
 								<input type="number" class="bgc_custom" :class="{selected: custom_size}" min="1" max="256" :value="size" @change="setSize($event.target.value)" title="Any other size">
+							</div>
+
+							<label>Grid <span class="bgc_subtle">where cubes may sit, in model units</span></label>
+							<div class="bgc_buttons">
+								<div class="bgc_button" :class="{selected: grid === 'size'}" @click="setGrid('size')" title="Snap to a grid as big as the cube">Cube size</div>
+								<div v-for="s in sizes" :key="'g' + s" class="bgc_button bgc_size" :class="{selected: grid === String(s)}" @click="setGrid(s)">{{ s }}</div>
 							</div>
 
 							<label>Names <span class="bgc_subtle">for your build script, always in capitals</span></label>
@@ -3247,8 +3279,14 @@
 					options: Object.fromEntries(SIZES.map(s => [String(s), s === 16 ? '16 (1 block)' : `${s}`])),
 					onChange() { setSize(this.value); }
 				});
+				gridSelect = new BarSelect('block_grid_cube_grid', {
+					name: 'Grid',
+					value: String(settings.grid),
+					options: Object.assign({ size: 'Grid: cube size' }, Object.fromEntries(SIZES.map(s => [String(s), `Grid: ${s}`]))),
+					onChange() { setGrid(this.value); }
+				});
 				toolbar = new Toolbar('block_grid_cube', {
-					children: ['block_grid_cube_mode', 'block_grid_cube_size']
+					children: ['block_grid_cube_mode', 'block_grid_cube_size', 'block_grid_cube_grid']
 				});
 
 				tool = new Tool('block_grid_cube', {
@@ -3275,6 +3313,7 @@
 					onSelect() {
 						modeSelect.set(settings.mode);
 						if (SIZES.includes(Number(settings.size))) sizeSelect.set(String(settings.size));
+						gridSelect.set(String(settings.grid));
 						syncPanel();
 						if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
 					},
@@ -3314,6 +3353,7 @@
 				if (typeof Toolbars !== 'undefined') delete Toolbars.block_grid_cube;
 				if (modeSelect) modeSelect.delete();
 				if (sizeSelect) sizeSelect.delete();
+				if (gridSelect) gridSelect.delete();
 				if (settingsAction) settingsAction.delete();
 				if (styleNode && styleNode.delete) styleNode.delete();
 			}
@@ -3327,7 +3367,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.5.0',
+		version: '1.6.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

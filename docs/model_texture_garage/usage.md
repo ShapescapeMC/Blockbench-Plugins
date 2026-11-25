@@ -212,6 +212,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 
 - `Mode`: Add, Cut out or Hollow. Press X to switch between Add and Cut out; Hollow is picked by hand. X only does this while the tool is in hand, and does its usual job (the Vertex Snap tool) otherwise. The switch at the bottom of the panel turns it off.
 - `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them.
+- `Grid`: where cubes may sit, in model units: `Cube size` (the default, a grid as big as the cube) or 4, 8, 16, 32 or 64, on the model's block grid. A finer grid than the cube lets you place, say, 16 cubes in 4-unit steps; a coarser one keeps small cubes to the corners of bigger cells.
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
 - `Hold to draw a line of cubes`: on by default, see above.
@@ -226,9 +227,11 @@ The mode and the standard sizes are also in the tool bar at the top, and the nam
 
 The cut and the hollowing themselves are left to your build script.
 
-### Cube size
+### Cube size and grid
 
-Cubes snap to a grid of the chosen size laid over the model's block grid, so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
+With `Grid` on `Cube size`, cubes snap to a grid of their own size laid over the model's block grid, so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face.
+
+Pick another `Grid` to snap to a different step. Across the face, the cube is centred on the cursor as near as the grid allows. In depth, an added cube starts at the grid line nearest the face, so on a fine grid it stacks flush on faces that are not on a block edge. Cut out and Hollow cubes always start at the face itself. A line drawn by dragging keeps its cubes a whole cube apart, starting from the first one, so a fine grid never leaves overlaps along the line. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
 
 ### The new cubes
 
