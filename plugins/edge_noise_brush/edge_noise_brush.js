@@ -49,7 +49,8 @@
 		grid_size: 16,        // Block Grid Brush cell size in texture pixels, or 'auto' for the model's own block size
 		grid_follow_model: true, // line cells up with the model's block grid rather than the texture's corner
 		grid_show: true,      // draw the block grid on the model while the Block Grid Brush is selected
-		grid_show_modes: {}   // the same for the other brushes: mode -> true to show it there too
+		grid_show_modes: {},  // the same for the other brushes: mode -> true to show it there too
+		edge_on_grid: false   // Edge Noise Brush: only break up the block-grid line nearest the brush
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -860,6 +861,44 @@
 	}
 
 	/**
+	 * The model coordinate at texture pixel position px along a face's u or v
+	 * axis: the reverse of faceGridAxis. Returns { axis, value } with the
+	 * model axis it lies on, or null.
+	 */
+	function facePixelToModel(cube, faceKey, uv, axis, px, factor, turned) {
+		const info = FACE_AXES[faceKey] && FACE_AXES[faceKey][axis];
+		if (!info) return null;
+		const modelAxis = info[0];
+		const startEnd = turned ? (info[1] === 'to' ? 'from' : 'to') : info[1];
+		const dir = turned ? -info[2] : info[2];
+		const extent = cube.to[modelAxis] - cube.from[modelAxis];
+		const a = axis === 'u' ? uv[0] : uv[1], b = axis === 'u' ? uv[2] : uv[3];
+		if (!extent || a === b) return null;
+		const start = startEnd === 'to' ? cube.to[modelAxis] : cube.from[modelAxis];
+		return { axis: modelAxis, value: start + dir * (px / factor - a) * (extent / (b - a)) };
+	}
+
+	/**
+	 * The grid line nearest to (x, y) in texture pixels. grid is { x, y } of
+	 * { anchor, cell }; only: 'x' for lines running up and down (at a fixed
+	 * x), 'y' for lines running across, or null for whichever is nearer.
+	 * Returns { axis, pos, dist }: pos is the pixel boundary the line sits on.
+	 */
+	function nearestGridLine(x, y, grid, only) {
+		const pick = (axis, p) => {
+			const g = grid[axis];
+			const k = Math.round((p - g.anchor) / g.cell);
+			const pos = Math.round(g.anchor + k * g.cell);
+			return { axis, pos, dist: Math.abs(p - pos) };
+		};
+		// brush positions are pixel centres; a line sits between two pixels
+		const lx = pick('x', x + 0.5), ly = pick('y', y + 0.5);
+		if (only === 'x') return lx;
+		if (only === 'y') return ly;
+		return lx.dist <= ly.dist ? lx : ly;
+	}
+
+	/**
 	 * The cells to fill for a brush dab at (x, y) of size `size`, given the grid
 	 * along each axis ({ anchor, cell }). Returns [{ x, y, w, h, key }].
 	 */
@@ -876,7 +915,7 @@
 	}
 
 	if (typeof module !== 'undefined' && module.exports) {
-		module.exports = { faceGridAxis, gridCells, gridLines, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
+		module.exports = { faceGridAxis, facePixelToModel, nearestGridLine, gridCells, gridLines, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
 	}
 	if (typeof Plugin === 'undefined') return;
 
@@ -1371,7 +1410,9 @@
 
 	/** The edge result after `level` applications, for the current stroke direction. */
 	function edgeResult(level) {
-		const mode = settings.follow_stroke && cache.dir ? cache.dir : 'both';
+		// on a block line only edges along that line count: across lines run 'h', up-and-down lines 'v'
+		const mode = cache.gridLine ? (cache.gridLine.axis === 'y' ? 'h' : 'v')
+			: settings.follow_stroke && cache.dir ? cache.dir : 'both';
 		const levels = cache.levels[mode];
 		while (levels.length <= level) {
 			const s = mode === 'both' ? settings : Object.assign({}, settings, {
@@ -1400,10 +1441,39 @@
 
 	function edgePixel(x, y, px, alpha, opts) {
 		const i = y * cache.w + x;
+		if (settings.edge_on_grid) {
+			updateGridLine(opts);
+			const line = cache.gridLine;
+			if (!line) return px;
+			// only the band along the line that the steps can reach
+			const reach = (cache.preset ? cache.preset.height * Math.max(1, Number(cache.presetOpt && cache.presetOpt.depth) || 1)
+				: Math.max(1, settings.step_depth | 0)) * (1 + cache.passes[i]);
+			const d = (line.axis === 'x' ? x : y) + 0.5 - line.pos;
+			if (Math.abs(d) > reach) return px;
+		}
 		if (isNewPass(i) && settings.grow_on_repeat) {
 			cache.passes[i] = Math.min(Math.max(0, settings.max_growth | 0), cache.passes[i] + 1);
 		}
 		return blendTowards(edgeResult(1 + cache.passes[i]), x, y, px, alpha, opts);
+	}
+
+	/**
+	 * Picks the block-grid line the brush is drawing on, once per brush step:
+	 * the nearest one, running the way the stroke goes once that is known.
+	 */
+	function updateGridLine(opts) {
+		if (typeof opts.x !== 'number') return;
+		if (cache.gridLineAt === cache.dabX + ',' + cache.dabY + ',' + cache.dir) return;
+		cache.gridLineAt = cache.dabX + ',' + cache.dabY + ',' + cache.dir;
+		const grid = currentGrid(cache.texture);
+		// sideways strokes follow lines running across, up-and-down strokes lines running up and down
+		const only = cache.dir === 'h' ? 'y' : cache.dir === 'v' ? 'x' : (cache.gridLine ? cache.gridLine.axis : null);
+		const line = nearestGridLine(opts.x, opts.y, grid, only);
+		const prev = cache.gridLine;
+		if (!prev || prev.axis !== line.axis || prev.pos !== line.pos) {
+			cache.gridLine = line;
+			markGridLine(line, cache.texture);
+		}
 	}
 
 	function noisePixel(x, y, px, alpha, opts) {
@@ -1457,6 +1527,7 @@
 		const brush = BarItems.brush_tool;
 		if (brush && brush.setIcon) brush.setIcon(activeMode ? MODES[activeMode].icon : original.icon);
 		updateGridOverlay();
+		clearLineMarker();
 		// colours the Brush tool's icon wherever it shows while one of these modes is on
 		document.body.classList.toggle('edge_noise_brush_active', !!activeMode);
 		// first use of a preset brush: ask for the preset folder
@@ -1558,7 +1629,8 @@
 			};
 			vue.grid = {
 				size: String(settings.grid_size), follow: settings.grid_follow_model, show: settings.grid_show,
-				show_here: !!settings.grid_show_modes[mode]
+				show_here: !!settings.grid_show_modes[mode],
+				edge_on_grid: settings.edge_on_grid
 			};
 			if (!mode || mode === 'grid') return;
 			try {
@@ -1776,6 +1848,7 @@
 		if (key === 'grid_size') settings.grid_size = value === 'auto' ? 'auto' : Math.max(1, Math.min(256, Math.round(Number(value)) || 16));
 		if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
 		if (key === 'grid_show') settings.grid_show = !!value;
+		if (key === 'edge_on_grid') { settings.edge_on_grid = !!value; clearCache(); if (!value) clearLineMarker(); }
 		if (key === 'grid_show_here' && activeMode) settings.grid_show_modes = Object.assign({}, settings.grid_show_modes, { [activeMode]: !!value });
 		saveSettings();
 		refreshPanel();
@@ -1799,7 +1872,9 @@
 	/** Whether the grid should show: Block Grid Brush active, Brush tool in hand, Paint mode. */
 	function gridOverlayWanted() {
 		if (!activeMode) return false;
-		if (activeMode === 'grid' ? !settings.grid_show : !settings.grid_show_modes[activeMode]) return false;
+		const shown = activeMode === 'grid' ? settings.grid_show
+			: settings.grid_show_modes[activeMode] || (activeMode === 'edge' && settings.edge_on_grid);
+		if (!shown) return false;
 		if (typeof Modes !== 'undefined' && !Modes.paint) return false;
 		const brush = BarItems.brush_tool;
 		// holding Alt swaps to the colour picker for a moment: keep the grid up
@@ -1854,6 +1929,46 @@
 			cube.mesh.add(lines);
 			gridOverlay.push(lines);
 		}
+	}
+
+	/* --- the block line the Edge Noise Brush is drawing on --- */
+
+	let lineMarker = null;
+	let markerMaterial = null;
+	const MARKER_COLOR = '#ffd23f';
+
+	function clearLineMarker() {
+		if (!lineMarker) return;
+		if (lineMarker.parent) lineMarker.parent.remove(lineMarker);
+		lineMarker.geometry.dispose();
+		lineMarker = null;
+	}
+
+	/** Highlights the chosen block line on the face being painted, across the whole face. */
+	function markGridLine(line, texture) {
+		clearLineMarker();
+		if (typeof THREE === 'undefined' || !texture) return;
+		const cube = Painter.current && Painter.current.element;
+		const faceKey = Painter.current && Painter.current.face;
+		const face = cube && cube.faces && cube.faces[faceKey];
+		const plane = FACE_PLANES[faceKey];
+		if (!face || !cube.mesh || !plane || !cube.from || !(face.rotation === 0 || face.rotation === 180 || !face.rotation)) return;
+		const fx = texture.width / texture.getUVWidth(), fy = texture.display_height / texture.getUVHeight();
+		const uvAxis = line.axis === 'x' ? 'u' : 'v';
+		const at = facePixelToModel(cube, faceKey, face.uv, uvAxis, line.pos, uvAxis === 'u' ? fx : fy, face.rotation === 180);
+		if (!at) return;
+		const [n, end, out] = plane;
+		const other = [0, 1, 2].find(a => a !== n && a !== at.axis);
+		const size = [0, 0, 0], centre = [0, 0, 0];
+		size[at.axis] = 0.35; centre[at.axis] = at.value;
+		size[other] = cube.to[other] - cube.from[other]; centre[other] = (cube.to[other] + cube.from[other]) / 2;
+		size[n] = 0.06; centre[n] = cube[end][n] + out * 0.05;
+		if (!markerMaterial) markerMaterial = new THREE.MeshBasicMaterial({ color: MARKER_COLOR });
+		lineMarker = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), markerMaterial);
+		lineMarker.name = 'edge_noise_block_line';
+		lineMarker.position.set(centre[0] - cube.origin[0], centre[1] - cube.origin[1], centre[2] - cube.origin[2]);
+		lineMarker.renderOrder = 3;
+		cube.mesh.add(lineMarker);
 	}
 
 	/** Rebuilds the grid shortly, once a burst of changes has settled. */
@@ -2073,7 +2188,7 @@
 						texture_too_large: false,
 						noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
 						grow_mode: 'brush',
-						grid: { size: '16', follow: true, show: true, show_here: false }
+						grid: { size: '16', follow: true, show: true, show_here: false, edge_on_grid: false }
 					};
 				},
 				computed: {
@@ -2176,6 +2291,10 @@
 							</p>
 							<p class="edge_noise_error" v-if="selected_error">{{ selected_error }}</p>
 
+							<div class="edge_noise_slider" v-if="mode === 'edge'" title="Only break up the block-grid line nearest the brush, in a band along it. The line is highlighted on the model while you paint.">
+								<span>On block lines</span>
+								<input type="checkbox" :checked="grid.edge_on_grid" @change="setGrid('edge_on_grid', $event.target.checked)">
+							</div>
 							<div class="edge_noise_slider" v-if="mode === 'edge'" title="Which tone the brush grows into its neighbour.">
 								<span>Grows</span>
 								<select :value="grow_mode" @change="setGrowMode($event.target.value)">
@@ -2277,7 +2396,7 @@
 								<span>Block grid</span>
 								<input type="checkbox" :checked="grid.show_here" @change="setGrid('grid_show_here', $event.target.checked)">
 							</div>
-							<div class="edge_noise_slider" v-if="grid.show_here" title="How big one cell of the grid is, in texture pixels. Shared with the Block Grid Brush.">
+							<div class="edge_noise_slider" v-if="grid.show_here || (mode === 'edge' && grid.edge_on_grid)" title="How big one cell of the grid is, in texture pixels. Shared with the Block Grid Brush.">
 								<span>Block size</span>
 								<select :value="grid.size" @change="setGrid('grid_size', $event.target.value)">
 									<option value="auto">Auto (from the model)</option>
@@ -2440,7 +2559,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.14.0',
+		version: '0.15.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
@@ -2481,7 +2600,9 @@
 			listeners.length = 0;
 			clearTimeout(gridTimer);
 			clearGridOverlay();
+			clearLineMarker();
 			if (gridMaterial) gridMaterial.dispose();
+			if (markerMaterial) markerMaterial.dispose();
 			unhookBrushTool();
 			document.body.classList.remove('edge_noise_brush_active');
 			if (panel) panel.delete();

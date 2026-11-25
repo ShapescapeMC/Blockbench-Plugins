@@ -12,6 +12,12 @@ Hold Alt to pick a colour from the texture, as with the normal brush.
 
 Painting away from any edge does nothing, since there is nothing to break up.
 
+### On block lines
+
+Tick `On block lines` in the panel to break up only the seams between blocks. The brush then picks the block-grid line nearest to where you paint and only changes a band along it, as wide as the steps can reach, so the rest of each block keeps its edges as they are. A sideways stroke follows the line running across, an up-and-down stroke the line running up and down, and at the start of a stroke the nearest line wins. The chosen line is highlighted in yellow on the model, across the whole face, so you can see which seam you are on. The block grid shows while the option is on, and `Block size` below it sets the spacing, shared with the Block Grid Brush.
+
+The seam needs two different tones on either side to break up, as with any edge: paint the blocks in different colours first, for example with the Block Grid Brush.
+
 Going back over a spot without letting go grows the brush colour another step each time, so scrubbing back and forth over an edge pushes it further. Each return also varies the steps, so the edge keeps breaking up rather than just getting thicker. A new stroke starts from what is on the texture again. `Max extra growth per stroke` in the settings caps how far one stroke can go, and `Grow on repeated passes` turns it off.
 
 The direction you paint in picks which edges change: paint up or down along a vertical edge and only vertical edges break up, paint sideways along a horizontal edge and only horizontal edges do. That keeps a stroke along one edge from also roughening a corner it passes. Turn `Follow stroke direction` off in the settings to always break up both.
