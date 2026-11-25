@@ -165,3 +165,20 @@ The Texture Reference panel is a second, zoomed view of your texture to pick col
 - The view updates after every stroke, so it always shows the texture as it is now.
 
 References are remembered between sessions. A reference keeps working while its texture is open in a project; otherwise the panel says so.
+
+## Block Grid Brush
+
+The Block Grid Brush is another mode in the Brush tool's dropdown. It fills whole block cells with the brush colour, snapped to the model's block grid, for blocking out colour per block on models built from whole blocks.
+
+Paint on the model in the viewport. On each cube face the brush works out where the model's block edges fall, every 16 units, and lines the cells up with them, whatever the face's position on the texture. A face that starts halfway into a block gets a half cell first. On formats with a centred grid, such as Bedrock entities, block edges sit at ±8 on the x and z axes, and the brush follows that. Paint stays inside the face you are painting.
+
+The panel has two settings:
+
+- `Block size`: how big one cell is in texture pixels: 8, 16, 32, 64 or 128. `Auto` uses the size of one block on the face you are painting, from its UV, so it matches the model exactly even if faces differ in texture density.
+- `Snap to model`: on by default. Turn it off, or paint in the UV editor, and the cells start at the top left corner of the texture instead.
+
+Brush size decides how many cells one dab covers: at size 1 it fills the cell under the cursor. Brush opacity applies once per cell in each stroke, so going over a cell again in the same stroke does not darken it further. Hold Alt to pick a colour, as with the normal brush.
+
+```{note}
+Cells line up with the model on faces with their UV turned by 0 or 180 degrees. On faces turned by 90 or 270 degrees, the cells start at the face's corner on the texture instead.
+```

@@ -45,7 +45,9 @@
 		preset_options: {},   // 'kind/name' -> options for that preset
 		references: [],       // saved areas for the Texture Reference panel
 		reference_selected: '', // id of the reference shown, '' = the whole selected texture
-		settings_version: 2
+		settings_version: 2,
+		grid_size: 16,        // Block Grid Brush cell size in texture pixels, or 'auto' for the model's own block size
+		grid_follow_model: true // line cells up with the model's block grid rather than the texture's corner
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -770,8 +772,64 @@
 		return density * (1 - falloff * dd * dd) * localOpacity;
 	}
 
+	/* --- block grid brush --- */
+
+	// For each cube face: which model axis runs along the texture's u and v,
+	// which end of the cube the start of the UV rectangle sits at, and which
+	// way the axis runs. Matches Blockbench's own automatic UV layout.
+	const FACE_AXES = {
+		north: { u: [0, 'to', -1], v: [1, 'to', -1] },
+		south: { u: [0, 'from', 1], v: [1, 'to', -1] },
+		west: { u: [2, 'from', 1], v: [1, 'to', -1] },
+		east: { u: [2, 'to', -1], v: [1, 'to', -1] },
+		up: { u: [0, 'from', 1], v: [2, 'from', 1] },
+		down: { u: [0, 'from', 1], v: [2, 'to', -1] }
+	};
+
+	/**
+	 * The block grid of a cube face in texture pixels, along one texture axis.
+	 * Returns { anchor, block }: a pixel position where a block edge falls,
+	 * and how many pixels one block (16 model units) takes up on this face.
+	 * axis is 'u' or 'v'; uv is the face's [u1, v1, u2, v2]; factor converts
+	 * UV units to texture pixels; offset is where block edges sit on that
+	 * model axis (8 on centred grids for x and z, otherwise 0).
+	 */
+	function faceGridAxis(cube, faceKey, uv, axis, factor, offset, turned) {
+		const info = FACE_AXES[faceKey] && FACE_AXES[faceKey][axis];
+		if (!info) return null;
+		// a face turned by 180 degrees starts at the other end and runs the other way
+		const modelAxis = info[0];
+		const startEnd = turned ? (info[1] === 'to' ? 'from' : 'to') : info[1];
+		const dir = turned ? -info[2] : info[2];
+		const extent = cube.to[modelAxis] - cube.from[modelAxis];
+		const a = axis === 'u' ? uv[0] : uv[1], b = axis === 'u' ? uv[2] : uv[3];
+		if (!extent || a === b) return null;
+		const start = startEnd === 'to' ? cube.to[modelAxis] : cube.from[modelAxis];
+		const unitsPerUV = extent / (b - a);       // signed: negative for mirrored UVs
+		// the nearest block edge at or before the start of the face
+		const edge = Math.floor((start - offset) / 16) * 16 + offset;
+		const uvAtEdge = a + (edge - start) / (dir * unitsPerUV);
+		return { anchor: uvAtEdge * factor, block: Math.abs(16 / unitsPerUV) * factor };
+	}
+
+	/**
+	 * The cells to fill for a brush dab at (x, y) of size `size`, given the grid
+	 * along each axis ({ anchor, cell }). Returns [{ x, y, w, h, key }].
+	 */
+	function gridCells(x, y, size, gx, gy) {
+		const r = Math.max(0, (size - 1) / 2);
+		const cells = [];
+		const i0 = Math.floor((x - r - gx.anchor) / gx.cell), i1 = Math.floor((x + r - gx.anchor) / gx.cell);
+		const j0 = Math.floor((y - r - gy.anchor) / gy.cell), j1 = Math.floor((y + r - gy.anchor) / gy.cell);
+		for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+			const cx = gx.anchor + i * gx.cell, cy = gy.anchor + j * gy.cell;
+			cells.push({ x: Math.round(cx), y: Math.round(cy), w: Math.round(cx + gx.cell) - Math.round(cx), h: Math.round(cy + gy.cell) - Math.round(cy), key: i + ',' + j });
+		}
+		return cells;
+	}
+
 	if (typeof module !== 'undefined' && module.exports) {
-		module.exports = { processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
+		module.exports = { faceGridAxis, gridCells, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
 	}
 	if (typeof Plugin === 'undefined') return;
 
@@ -800,6 +858,7 @@
 	const MODES = {
 		edge: { name: 'Edge Noise Brush', icon: 'grain' },
 		noise: { name: 'Noise Brush', icon: 'blur_on' },
+		grid: { name: 'Block Grid Brush', icon: 'grid_on' },
 		highlight: { name: 'Highlight Brush', icon: 'light_mode' },
 		shadow: { name: 'Shadow Brush', icon: 'dark_mode' }
 	};
@@ -1448,7 +1507,8 @@
 				density: settings.noise_density, falloff: settings.noise_falloff,
 				grain: settings.noise_grain, seed: settings.noise_seed
 			};
-			if (!mode) return;
+			vue.grid = { size: String(settings.grid_size), follow: settings.grid_follow_model };
+			if (!mode || mode === 'grid') return;
 			try {
 				const kind = mode;
 				const name = selectedPresetName(kind);
@@ -1600,6 +1660,71 @@
 		if (d[3] === 0) return;
 		const hex = '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
 		ColorPanel.set(hex, secondary);
+	}
+
+	// cells already filled in the current stroke, so a dab going over one again does not stack opacity
+	let gridFilled = new Set();
+
+	/** The grid to paint on for the face under the brush: { x: {anchor, cell}, y: {anchor, cell} }. */
+	function currentGrid(texture) {
+		const fixed = Number(settings.grid_size);
+		const auto = settings.grid_size === 'auto' || !(fixed > 0);
+		let gx = null, gy = null;
+		const element = typeof Painter !== 'undefined' && Painter.current && Painter.current.element;
+		const faceKey = Painter.current && Painter.current.face;
+		const face = element && element.faces && element.faces[faceKey];
+		if (settings.grid_follow_model && face && element.from && element.to && Array.isArray(face.uv) && FACE_AXES[faceKey]) {
+			const rot = face.rotation || 0;
+			const fx = texture.width / texture.getUVWidth(), fy = texture.display_height / texture.getUVHeight();
+			const centred = typeof Format !== 'undefined' && Format.centered_grid;
+			// on centred grids block edges sit at +-8 on x and z
+			const off = (axis) => centred && FACE_AXES[faceKey][axis][0] !== 1 ? 8 : 0;
+			if (rot === 0 || rot === 180) {
+				gx = faceGridAxis(element, faceKey, face.uv, 'u', fx, off('u'), rot === 180);
+				gy = faceGridAxis(element, faceKey, face.uv, 'v', fy, off('v'), rot === 180);
+			} else {
+				// turned by 90 or 270 degrees: start the grid at the face's corner
+				gx = { anchor: Math.min(face.uv[0], face.uv[2]) * fx, block: 16 };
+				gy = { anchor: Math.min(face.uv[1], face.uv[3]) * fy, block: 16 };
+			}
+		}
+		const cellFor = (g) => auto ? (g ? g.block : 16) : fixed;
+		return {
+			x: { anchor: gx ? gx.anchor : 0, cell: Math.max(1, cellFor(gx)) },
+			y: { anchor: gy ? gy.anchor : 0, cell: Math.max(1, cellFor(gy)) }
+		};
+	}
+
+	/** Block Grid Brush: fills every block cell the brush touches with the brush colour. */
+	function gridDraw({ ctx, x, y, size, texture, event }) {
+		if (!ctx || !texture) return;
+		const grid = currentGrid(texture);
+		const secondary = typeof Keybinds !== 'undefined' && Keybinds.extra && Keybinds.extra.paint_secondary_color
+			&& Keybinds.extra.paint_secondary_color.keybind.isTriggered(event);
+		const color = toRGB(ColorPanel.get(secondary));
+		if (!color) return;
+		// Blockbench's own settings (this plugin's are called settings too)
+		const bbSettings = window.settings;
+		const range = bbSettings && bbSettings.opacity_range && bbSettings.opacity_range.value == '255' ? 255 : 100;
+		const opacity = Math.max(0, Math.min(1, BarItems.slider_brush_opacity.get() / range));
+		ctx.save();
+		ctx.fillStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${opacity})`;
+		if (Painter.lock_alpha) ctx.globalCompositeOperation = 'source-atop';
+		const faceKey = (Painter.current && Painter.current.element ? Painter.current.element.uuid : '') + '/' + (Painter.current && Painter.current.face);
+		for (const cell of gridCells(x, y, size, grid.x, grid.y)) {
+			const key = faceKey + '/' + cell.key;
+			if (gridFilled.has(key)) continue;
+			gridFilled.add(key);
+			ctx.fillRect(cell.x, cell.y, cell.w, cell.h);
+		}
+		ctx.restore();
+	}
+
+	function setGridSetting(key, value) {
+		if (key === 'grid_size') settings.grid_size = value === 'auto' ? 'auto' : Math.max(1, Math.min(256, Math.round(Number(value)) || 16));
+		if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
+		saveSettings();
+		refreshPanel();
 	}
 
 	function createReferencePanel() {
@@ -1812,7 +1937,8 @@
 						texture_url: '',
 						texture_too_large: false,
 						noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
-						grow_mode: 'brush'
+						grow_mode: 'brush',
+						grid: { size: '16', follow: true }
 					};
 				},
 				computed: {
@@ -1846,6 +1972,7 @@
 					refresh() { refreshPanel(); },
 					setNoise(key, event) { setNoiseSetting(key, event.target.value); },
 					setOption(key, value) { setPresetOption(this.mode, this.selected, key, value); },
+					setGrid(key, value) { setGridSetting(key, value); },
 					setGrowMode(value) {
 						settings.grow_mode = value;
 						saveSettings();
@@ -1855,7 +1982,25 @@
 				},
 				template: `
 					<div class="edge_noise_panel">
-						<template v-if="mode">
+						<template v-if="mode === 'grid'">
+							<div class="edge_noise_slider" title="How big one cell of the grid is, in texture pixels. Auto uses the size of one block on the face you paint.">
+								<span>Block size</span>
+								<select :value="grid.size" @change="setGrid('grid_size', $event.target.value)">
+									<option value="auto">Auto (from the model)</option>
+									<option value="8">8 px</option>
+									<option value="16">16 px</option>
+									<option value="32">32 px</option>
+									<option value="64">64 px</option>
+									<option value="128">128 px</option>
+								</select>
+							</div>
+							<div class="edge_noise_slider" title="Line the cells up with the model's block grid on the face you paint. Off: cells start at the top left corner of the texture.">
+								<span>Snap to model</span>
+								<input type="checkbox" :checked="grid.follow" @change="setGrid('grid_follow_model', $event.target.checked)">
+							</div>
+							<p class="edge_noise_hint">Fills every block cell the brush touches with the brush colour. Paint on the model to line the cells up with its blocks. Brush size decides how many cells one dab covers, and opacity applies once per cell in each stroke.</p>
+						</template>
+						<template v-if="mode && mode !== 'grid'">
 							<div class="edge_noise_bar">
 								<div class="tool" title="Add presets from PNG files" @click="importPresets()"><i class="material-icons">add_photo_alternate</i></div>
 								<div class="tool" title="New preset from the selected area of the texture (the whole texture if nothing is selected)" @click="saveTextureAsPreset()"><i class="material-icons">highlight_alt</i></div>
@@ -2064,7 +2209,13 @@
 			if (activeMode) return changePixel(px, py, pxcolor, local_opacity, opts);
 			return original.changePixel.apply(this, arguments);
 		};
+		// the Block Grid Brush paints whole cells itself, the painter's per-pixel pass is skipped
+		Object.defineProperty(tool.brush, 'draw', {
+			configurable: true,
+			get() { return activeMode === 'grid' ? gridDraw : undefined; }
+		});
 		tool.brush.onStrokeStart = function () {
+			gridFilled = new Set();
 			if (activeMode) clearCache();
 			if (original.onStrokeStart) return original.onStrokeStart.apply(this, arguments);
 		};
@@ -2107,6 +2258,7 @@
 			tool.brush.changePixel = original.changePixel;
 			tool.brush.onStrokeStart = original.onStrokeStart;
 			tool.brush.onStrokeEnd = original.onStrokeEnd;
+			delete tool.brush.draw;
 			if (tool.side_menu && original.structure) tool.side_menu.structure = original.structure;
 			if (tool.setIcon) tool.setIcon(original.icon);
 		}
@@ -2119,7 +2271,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.11.0',
+		version: '0.12.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
