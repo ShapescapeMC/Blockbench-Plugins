@@ -48,7 +48,8 @@
 		settings_version: 2,
 		grid_size: 16,        // Block Grid Brush cell size in texture pixels, or 'auto' for the model's own block size
 		grid_follow_model: true, // line cells up with the model's block grid rather than the texture's corner
-		grid_show: true       // draw the block grid on the model while the Block Grid Brush is selected
+		grid_show: true,      // draw the block grid on the model while the Block Grid Brush is selected
+		grid_show_modes: {}   // the same for the other brushes: mode -> true to show it there too
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -887,6 +888,7 @@
 		const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
 		for (const key in DEFAULTS) if (key in stored) settings[key] = stored[key];
 		if (!settings.preset_options || typeof settings.preset_options !== 'object') settings.preset_options = {};
+		if (!settings.grid_show_modes || typeof settings.grid_show_modes !== 'object') settings.grid_show_modes = {};
 		if (!('grow_mode' in stored) && stored.use_brush_color === false) settings.grow_mode = 'both';
 		if (!['brush', 'start', 'both'].includes(settings.grow_mode)) settings.grow_mode = 'brush';
 		// version 2 compares tones by colour channel and lowered the edge threshold
@@ -1554,7 +1556,10 @@
 				density: settings.noise_density, falloff: settings.noise_falloff,
 				grain: settings.noise_grain, seed: settings.noise_seed
 			};
-			vue.grid = { size: String(settings.grid_size), follow: settings.grid_follow_model, show: settings.grid_show };
+			vue.grid = {
+				size: String(settings.grid_size), follow: settings.grid_follow_model, show: settings.grid_show,
+				show_here: !!settings.grid_show_modes[mode]
+			};
 			if (!mode || mode === 'grid') return;
 			try {
 				const kind = mode;
@@ -1771,6 +1776,7 @@
 		if (key === 'grid_size') settings.grid_size = value === 'auto' ? 'auto' : Math.max(1, Math.min(256, Math.round(Number(value)) || 16));
 		if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
 		if (key === 'grid_show') settings.grid_show = !!value;
+		if (key === 'grid_show_here' && activeMode) settings.grid_show_modes = Object.assign({}, settings.grid_show_modes, { [activeMode]: !!value });
 		saveSettings();
 		refreshPanel();
 		updateGridOverlay();
@@ -1792,7 +1798,8 @@
 
 	/** Whether the grid should show: Block Grid Brush active, Brush tool in hand, Paint mode. */
 	function gridOverlayWanted() {
-		if (activeMode !== 'grid' || !settings.grid_show) return false;
+		if (!activeMode) return false;
+		if (activeMode === 'grid' ? !settings.grid_show : !settings.grid_show_modes[activeMode]) return false;
 		if (typeof Modes !== 'undefined' && !Modes.paint) return false;
 		const brush = BarItems.brush_tool;
 		// holding Alt swaps to the colour picker for a moment: keep the grid up
@@ -1818,7 +1825,8 @@
 			});
 			const spacing = (faceKey, axis) => {
 				// without snapping, cells start at the texture's corner and do not follow the model
-				if (!settings.grid_follow_model) return 0;
+				// (only for the Block Grid Brush itself: the others just show the model's blocks)
+				if (activeMode === 'grid' && !settings.grid_follow_model) return 0;
 				if (auto) return 16;
 				// a fixed cell size in pixels: how many model units that is on this face
 				const face = cube.faces[faceKey];
@@ -2065,7 +2073,7 @@
 						texture_too_large: false,
 						noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
 						grow_mode: 'brush',
-						grid: { size: '16', follow: true, show: true }
+						grid: { size: '16', follow: true, show: true, show_here: false }
 					};
 				},
 				computed: {
@@ -2265,6 +2273,21 @@
 								<p class="edge_noise_hint" v-else-if="texture_too_large">This texture is too large to preview.</p>
 								<p class="edge_noise_hint" v-else>Select a texture to preview it here.</p>
 							</template>
+							<div class="edge_noise_slider edge_noise_grid_toggle" title="Draw the model's block grid in the viewport while this brush is selected.">
+								<span>Block grid</span>
+								<input type="checkbox" :checked="grid.show_here" @change="setGrid('grid_show_here', $event.target.checked)">
+							</div>
+							<div class="edge_noise_slider" v-if="grid.show_here" title="How big one cell of the grid is, in texture pixels. Shared with the Block Grid Brush.">
+								<span>Block size</span>
+								<select :value="grid.size" @change="setGrid('grid_size', $event.target.value)">
+									<option value="auto">Auto (from the model)</option>
+									<option value="8">8 px</option>
+									<option value="16">16 px</option>
+									<option value="32">32 px</option>
+									<option value="64">64 px</option>
+									<option value="128">128 px</option>
+								</select>
+							</div>
 						</template>
 					</div>
 				`
@@ -2273,6 +2296,7 @@
 	}
 
 	const css = `
+		.edge_noise_grid_toggle { margin-top: 10px; }
 		.edge_noise_ref { display: flex; flex-direction: column; height: 100%; padding: 4px 8px 8px; box-sizing: border-box; }
 		.edge_noise_ref_tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 		.edge_noise_ref_tabs > div { padding: 1px 8px; border-radius: 10px; background-color: var(--color-button); cursor: pointer;
@@ -2416,7 +2440,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.13.0',
+		version: '0.14.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

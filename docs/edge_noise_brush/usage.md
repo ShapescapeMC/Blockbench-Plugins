@@ -180,6 +180,8 @@ The panel has two settings:
 
 Brush size decides how many cells one dab covers: at size 1 it fills the cell under the cursor. Brush opacity applies once per cell in each stroke, so going over a cell again in the same stroke does not darken it further. Hold Alt to pick a colour, as with the normal brush.
 
+The grid can show with the other brushes too. At the bottom of their panel, tick `Block grid` to draw the model's blocks in the viewport while that brush is selected, for example to keep edges, highlights or noise in step with the blocks. Each brush remembers its own choice, and `Block size` below it is shared with the Block Grid Brush.
+
 ```{note}
 Cells line up with the model on faces with their UV turned by 0 or 180 degrees. On faces turned by 90 or 270 degrees, the cells start at the face's corner on the texture instead.
 ```
