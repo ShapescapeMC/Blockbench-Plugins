@@ -10,6 +10,11 @@ This plugin renders the model you have open into finished images and GIFs: still
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
+### Edge Noise Brush
+This plugin adds a paint tool that breaks up straight edges between two tones into random pixel steps, using only the colours already on either side. By default only the selected paint colour grows into its neighbour, and painting over the same spot twice in one stroke does not stack.
+
+[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/edge_noise_brush/about.html)
+
 ### System Template File Loader
 This plugin allows for easy importing of PNG and animation files into a project when the geometry file is located in the same directory as the other files. For example, when using a custom folder structure in the Regolith filter system template. It can currently read files from the same directory or from subdirectories.
 
