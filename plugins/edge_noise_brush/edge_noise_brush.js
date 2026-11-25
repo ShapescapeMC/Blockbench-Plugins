@@ -29,6 +29,7 @@
 		use_brush_color: true, // only grow the selected paint colour
 		color_tolerance: 6,  // how close a pixel must be to the paint colour (0-255 per channel)
 		seed: 1,
+		follow_stroke: true, // strokes going up/down only break vertical edges, sideways only horizontal
 		preset: ''           // preset name, '' = random steps
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
@@ -363,7 +364,24 @@
 	let settingsAction, panel;
 	let original = null;
 	const listeners = [];
-	const clearCache = () => { cache = null; };
+	// direction of the current stroke: null until it has moved a few pixels, then 'h' or 'v'
+	let stroke = { x: null, y: null, dir: null };
+	const STROKE_STEP = 3;
+	const clearCache = () => { cache = null; stroke = { x: null, y: null, dir: null }; };
+
+	function trackStroke(opts) {
+		if (typeof opts.x !== 'number' || typeof opts.y !== 'number') return;
+		if (stroke.x === null) { stroke.x = opts.x; stroke.y = opts.y; return; }
+		const mx = Math.abs(opts.x - stroke.x), my = Math.abs(opts.y - stroke.y);
+		if (Math.max(mx, my) < STROKE_STEP) return;
+		stroke.dir = my > mx ? 'v' : 'h';
+		stroke.x = opts.x; stroke.y = opts.y;
+	}
+
+	/** Which edges to break up right now: 'both', 'h' or 'v'. */
+	function strokeMode() {
+		return settings.follow_stroke && stroke.dir ? stroke.dir : 'both';
+	}
 
 	/* --- presets --- */
 
@@ -421,7 +439,10 @@
 	}
 
 	function readWebPresets() {
-		try { return JSON.parse(localStorage.getItem(WEB_PRESETS_KEY) || '[]'); } catch (e) { return []; }
+		try {
+			const list = JSON.parse(localStorage.getItem(WEB_PRESETS_KEY) || '[]');
+			return Array.isArray(list) ? list.filter(p => p && typeof p.name === 'string' && typeof p.data === 'string') : [];
+		} catch (e) { return []; }
 	}
 
 	async function reloadPresets(ask) {
@@ -558,7 +579,19 @@
 		const canvas = getCanvas(texture);
 		const w = canvas.width, h = canvas.height;
 		const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-		cache = { texture, w, h, key: String(target), out: processImage(data, w, h, settings, target, selectedPreset()) };
+		cache = { texture, w, h, key: String(target), target, src: new Uint8ClampedArray(data), outs: {} };
+	}
+
+	// Results from the stroke-start snapshot, worked out once per direction.
+	function cachedResult(mode) {
+		if (!cache.outs[mode]) {
+			const s = mode === 'both' ? settings : Object.assign({}, settings, {
+				horizontal: mode === 'h' && settings.horizontal,
+				vertical: mode === 'v' && settings.vertical
+			});
+			cache.outs[mode] = processImage(cache.src, cache.w, cache.h, s, cache.target, selectedPreset());
+		}
+		return cache.outs[mode];
 	}
 
 	function changePixel(x, y, px, alpha, opts) {
@@ -566,8 +599,9 @@
 		if (!texture) return px;
 		const target = settings.use_brush_color ? getBrushColor(opts) : null;
 		if (!cache || cache.texture !== texture || cache.key !== String(target)) buildCache(texture, target);
+		trackStroke(opts);
 		if (x < 0 || y < 0 || x >= cache.w || y >= cache.h) return px;
-		const i = (y * cache.w + x) * 4, o = cache.out;
+		const i = (y * cache.w + x) * 4, o = cachedResult(strokeMode());
 		if (o[i + 3] === 0) return px;
 		const opacity = typeof opts.opacity === 'number' ? opts.opacity : 1;
 		const a = Math.max(0, Math.min(1, alpha * opacity));
@@ -662,6 +696,8 @@
 				_a: '_',
 				horizontal: { label: 'Horizontal edges', type: 'checkbox', value: s.horizontal },
 				vertical: { label: 'Vertical edges', type: 'checkbox', value: s.vertical },
+				follow_stroke: { label: 'Follow stroke direction', type: 'checkbox', value: s.follow_stroke,
+					description: 'Strokes going up or down only break up vertical edges, with the pattern turned to run along them. Sideways strokes only break up horizontal edges.' },
 				threshold: { label: 'Edge threshold', type: 'number', value: s.threshold, min: 1, max: 255 },
 				seed: { label: 'Seed', type: 'number', value: s.seed, min: 0, max: 99999 }
 			},
@@ -849,7 +885,7 @@
 		author: 'Shapescape',
 		description: 'Brush mode that breaks straight edges between two tones into steps, randomly or following your own presets.',
 		icon: 'grain',
-		version: '0.4.0',
+		version: '0.5.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

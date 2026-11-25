@@ -6,6 +6,8 @@ Hold Alt to pick a colour from the texture, as with the normal brush. With `Grow
 
 Painting away from any edge does nothing, since there is nothing to break up.
 
+The direction you paint in picks which edges change: paint up or down along a vertical edge and only vertical edges break up, paint sideways along a horizontal edge and only horizontal edges do. That keeps a stroke along one edge from also roughening a corner it passes. Turn `Follow stroke direction` off in the settings to always break up both.
+
 To go back to the normal brush, pick any other entry from the Brush tool's dropdown, such as `Pixel Brush`.
 
 ## The panel
@@ -47,6 +49,7 @@ Open `Tools -> Edge Noise Brush Settings`, or the settings button in the panel. 
 - `Colour tolerance`: how close a pixel has to be to the brush colour, per RGB channel out of 255, to count as that colour.
 - `Roughness %`, `Max step depth (px)`, `Max segment length (px)`: shape the random steps. They are ignored when a preset is selected.
 - `Horizontal edges` / `Vertical edges`: which edge directions to break up.
+- `Follow stroke direction`: on by default. Once a stroke has moved a few pixels, a stroke going mostly up or down only breaks up vertical edges, with the pattern turned to run along them, and a stroke going mostly sideways only breaks up horizontal edges. A single click, or the start of a stroke, breaks up both. The edge toggles above still apply, so with `Vertical edges` off an upward stroke does nothing.
 - `Edge threshold`: how different two neighbouring pixels must be in brightness to count as an edge. Raise it to skip soft shading and only affect strong contrasts.
 - `Seed`: changes the random pattern. With a preset, it shifts where the pattern starts along the edge.
 
