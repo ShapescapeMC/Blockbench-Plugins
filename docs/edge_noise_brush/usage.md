@@ -2,7 +2,13 @@
 
 Switch to the Paint tab, click the small arrow on the Brush tool and pick `Edge Noise Brush`. Paint over an edge between two tones. Brush size, shape, softness and opacity work as with the normal brush, and softness and opacity blend between the original pixel and the stepped result.
 
-Hold Alt to pick a colour from the texture, as with the normal brush. With `Grow brush colour only` on, that is the colour that grows.
+Hold Alt to pick a colour from the texture, as with the normal brush.
+
+`Grows`, at the top of the panel, decides which tone grows into its neighbour:
+
+- `Brush colour`: the default. Only the brush colour grows, so pick it first, with Alt or from the colour panel.
+- `Colour where the stroke starts`: whatever tone is under the brush when you start the stroke grows, whatever the brush colour. Start inside the tone you want to grow.
+- `Both tones`: both sides push into each other.
 
 Painting away from any edge does nothing, since there is nothing to break up.
 
@@ -41,7 +47,7 @@ You can also draw one from scratch, the way the finished edge should look:
 - The edge can run across or up and down, and either side can be the bright one. The brush works that out.
 - Two flat colours are clearest, but any two tones work: the pixels are split into the brighter and darker half. Transparent pixels count as the dark side.
 - The width of the image is the length of the repeating pattern. Make it as long as the stretch you want before it repeats.
-- Leave a few rows of plain bright and plain dark on either side of the edge.
+- Leave a few rows of plain bright and plain dark on either side of the edge. Stray specks away from the edge are ignored: the edge is where the largest bright area meets the largest dark area.
 
 The brush repeats the edge's shape along every edge you paint over, horizontal and vertical. With `Grow brush colour only` on, the edge is shifted so the colour you paint with only ever grows. When the brush colour is the brighter tone, the bright side of the preset grows into the dark one, and the other way round. With it off, both tones move, and the straight edge sits at the preset's middle line.
 
@@ -69,18 +75,18 @@ Each preset keeps its own options, shown in the panel under the list when it is 
 
 Open `Tools -> Edge Noise Brush Settings`, or the settings button in the panel. Changes apply from the next stroke and are remembered between sessions.
 
-- `Grow brush colour only`: on by default. Only pixels matching the brush colour spread into the tone they border. Turn it off and both sides of every edge push into each other.
+- `Grows`: the same choice as at the top of the panel.
 - `Grow on repeated passes`: on by default. Going back over a spot in the same stroke grows it another step.
 - `Max extra growth per stroke`: how many extra steps one stroke can add by going back over a spot.
-- `Colour tolerance`: how close a pixel has to be to the brush colour, per RGB channel out of 255, to count as that colour.
+- `Colour tolerance`: how close a pixel has to be to the brush colour, per RGB channel out of 255, to count as that colour. It never goes past `Edge threshold`, so a close shade still counts as a different tone the brush can grow into.
 - `Roughness %`, `Max step depth (px)`, `Max segment length (px)`: shape the random steps. They are ignored when a preset is selected.
 - `Horizontal edges` / `Vertical edges`: which edge directions to break up.
 - `Follow stroke direction`: on by default. Once a stroke has moved a few pixels, a stroke going mostly up or down only breaks up vertical edges, with the pattern turned to run along them, and a stroke going mostly sideways only breaks up horizontal edges. A single click, or the start of a stroke, breaks up both. The edge toggles above still apply, so with `Vertical edges` off an upward stroke does nothing.
-- `Edge threshold`: how different two neighbouring pixels must be in brightness to count as an edge. Raise it to skip soft shading and only affect strong contrasts.
+- `Edge threshold`: how different two neighbouring pixels must be to count as an edge, as the largest difference in any of red, green and blue, out of 255. The default of 2 catches very close shades. Raise it to skip soft shading and only affect strong contrasts.
 - `Seed`: changes the random pattern. With a preset, it shifts where the pattern starts along the edge.
 
 ```{note}
-Two colours with almost the same brightness may not be seen as an edge. Lower `Edge threshold` if a boundary is being ignored.
+If the brush does nothing on an edge, check `Grows`: with `Brush colour`, the brush colour has to be one of the two tones. Two shades closer than `Edge threshold` are also seen as one tone; lower it if a boundary is being ignored.
 ```
 
 ## Noise Brush

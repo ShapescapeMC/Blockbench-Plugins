@@ -21,13 +21,14 @@
 	'use strict';
 
 	const DEFAULTS = {
-		threshold: 4,        // min luminance difference that counts as an edge
+		threshold: 2,        // how different two pixels must be (largest channel difference) to count as an edge
 		roughness: 60,       // % of segments that get pushed in or out
 		step_depth: 1,       // max px a segment moves
 		segment_length: 7,   // max segment length along the edge in px
 		horizontal: true,    // break up horizontal edges
 		vertical: true,      // break up vertical edges
-		use_brush_color: true, // only grow the selected paint colour
+		use_brush_color: true, // older versions' switch, read once into grow_mode
+		grow_mode: 'brush',   // which tone the edge brush grows: 'brush' colour, the tone where the stroke 'start's, or 'both'
 		color_tolerance: 6,  // how close a pixel must be to the paint colour (0-255 per channel)
 		seed: 1,
 		follow_stroke: true, // strokes going up/down only break vertical edges, sideways only horizontal
@@ -43,7 +44,8 @@
 		shadow_preset: '',
 		preset_options: {},   // 'kind/name' -> options for that preset
 		references: [],       // saved areas for the Texture Reference panel
-		reference_selected: '' // id of the reference shown, '' = the whole selected texture
+		reference_selected: '', // id of the reference shown, '' = the whole selected texture
+		settings_version: 2
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -67,17 +69,35 @@
 		return 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
 	}
 
+	/**
+	 * How different two pixels are: the largest difference in any colour
+	 * channel. Catches faint edges between close shades, and edges between
+	 * colours of the same brightness.
+	 */
+	function toneDiff(d, i, j) {
+		return Math.max(Math.abs(d[i * 4] - d[j * 4]), Math.abs(d[i * 4 + 1] - d[j * 4 + 1]), Math.abs(d[i * 4 + 2] - d[j * 4 + 2]));
+	}
+
 	/** Distance k (1..max) to the first pixel of a different tone, or -1. */
 	function scan(d, w, h, x, y, sx, sy, max, thr) {
-		const base = lumAt(d, y * w + x);
+		const p = y * w + x;
 		for (let k = 1; k <= max; k++) {
 			const qx = x + sx * k, qy = y + sy * k;
 			if (qx < 0 || qy < 0 || qx >= w || qy >= h) return -1;
 			const qi = qy * w + qx;
 			if (d[qi * 4 + 3] === 0) return -1;
-			if (Math.abs(lumAt(d, qi) - base) > thr) return k;
+			if (toneDiff(d, qi, p) > thr) return k;
 		}
 		return -1;
+	}
+
+	/**
+	 * How close a pixel must be to the brush colour to count as it. Never wider
+	 * than the edge threshold: a pixel more different than that is another tone,
+	 * so the brush colour can grow into it even when the two are close shades.
+	 */
+	function targetTolerance(s) {
+		return Math.min(Number(s.color_tolerance) || 0, Number(s.threshold) || 0);
 	}
 
 	function colorMatcher(src, target, tol) {
@@ -172,7 +192,7 @@
 		return {
 			reach: depth,
 			run(src, out, w, h, x0, y0, x1, y1) {
-				const isTarget = colorMatcher(src, target, s.color_tolerance);
+				const isTarget = colorMatcher(src, target, targetTolerance(s));
 				for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
 					const i = y * w + x;
 					if (src[i * 4 + 3] === 0 || isTarget(i)) continue;
@@ -188,7 +208,7 @@
 							const qi = qy * w + qx;
 							if (src[qi * 4 + 3] === 0) break;
 							if (isTarget(qi)) { found = k; break; }
-							if (Math.abs(lumAt(src, qi) - li) > thr) break;   // a third tone in between
+							if (toneDiff(src, qi, i) > thr) break;   // a third tone in between
 						}
 						if (found < 0) continue;
 						// edge key: position of the first non-target pixel next to the edge, plus side
@@ -201,6 +221,32 @@
 				}
 			}
 		};
+	}
+
+	/** The largest group of side-by-side touching pixels with mask value v, as a mask. */
+	function largestRegion(mask, w, h, v) {
+		const label = new Int32Array(w * h).fill(-1);
+		let best = -1, bestSize = 0, count = 0;
+		const stack = [];
+		for (let start = 0; start < w * h; start++) {
+			if (mask[start] !== v || label[start] >= 0) continue;
+			let size = 0;
+			label[start] = count;
+			stack.push(start);
+			while (stack.length) {
+				const i = stack.pop(), x = i % w, y = (i - x) / w;
+				size++;
+				if (x > 0 && mask[i - 1] === v && label[i - 1] < 0) { label[i - 1] = count; stack.push(i - 1); }
+				if (x < w - 1 && mask[i + 1] === v && label[i + 1] < 0) { label[i + 1] = count; stack.push(i + 1); }
+				if (y > 0 && mask[i - w] === v && label[i - w] < 0) { label[i - w] = count; stack.push(i - w); }
+				if (y < h - 1 && mask[i + w] === v && label[i + w] < 0) { label[i + w] = count; stack.push(i + w); }
+			}
+			if (size > bestSize) { bestSize = size; best = count; }
+			count++;
+		}
+		const out = new Uint8Array(w * h);
+		for (let i = 0; i < w * h; i++) if (label[i] === best && best >= 0) out[i] = 1;
+		return out;
 	}
 
 	/**
@@ -234,14 +280,16 @@
 		let bright = new Uint8Array(n);
 		for (let i = 0; i < n; i++) bright[i] = opaque(i) && lumAt(data, i) > split ? 1 : 0;
 
-		// orientation: a horizontal edge gives many changes down the columns
-		let downChanges = 0, acrossChanges = 0;
+		// orientation: the two sides lie above and below each other for an edge
+		// running across, and side by side for one running up and down
+		let bx = 0, by = 0, bn = 0, dxs = 0, dys = 0, dn = 0;
 		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-			if (y + 1 < h && bright[y * w + x] !== bright[(y + 1) * w + x]) downChanges++;
-			if (x + 1 < w && bright[y * w + x] !== bright[y * w + x + 1]) acrossChanges++;
+			if (bright[y * w + x]) { bx += x; by += y; bn++; } else { dxs += x; dys += y; dn++; }
 		}
+		const apartY = bn && dn ? Math.abs(by / bn - dys / dn) / h : 0;
+		const apartX = bn && dn ? Math.abs(bx / bn - dxs / dn) / w : 0;
 		let W = w, H = h;
-		if (acrossChanges > downChanges) {
+		if (apartX > apartY) {
 			const t = new Uint8Array(n);
 			for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) t[x * h + y] = bright[y * w + x];
 			bright = t; W = h; H = w;
@@ -258,14 +306,17 @@
 			bright = f;
 		}
 
-		// the band of rows the edge moves through
+		// The edge is where the main bright region meets the main dark region.
+		// Stray specks away from it are left out, so they cannot stretch the band.
+		const mainBright = largestRegion(bright, W, H, 1), mainDark = largestRegion(bright, W, H, 0);
 		const firstDark = new Int32Array(W), lastBright = new Int32Array(W);
 		let anyBright = false, anyDark = false;
 		for (let x = 0; x < W; x++) {
 			let fd = H, lb = -1;
 			for (let y = 0; y < H; y++) {
-				if (bright[y * W + x]) { lb = y; anyBright = true; }
-				else { if (fd === H) fd = y; anyDark = true; }
+				const i = y * W + x;
+				if (mainBright[i]) { lb = y; anyBright = true; }
+				if (mainDark[i]) { if (fd === H) fd = y; anyDark = true; }
 			}
 			firstDark[x] = fd; lastBright[x] = lb;
 		}
@@ -323,7 +374,7 @@
 			reach,
 			run(src, out, w, h, x0, y0, x1, y1) {
 				if (!reach) return;
-				const isTarget = target ? colorMatcher(src, target, s.color_tolerance) : null;
+				const isTarget = target ? colorMatcher(src, target, targetTolerance(s)) : null;
 				for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
 					const i = y * w + x;
 					if (src[i * 4 + 3] === 0) continue;
@@ -437,24 +488,24 @@
 	function lineEdge(src, w, h, x, y, sx, sy, reach, thr) {
 		const k = scan(src, w, h, x, y, sx, sy, reach, thr);
 		if (k < 0) return null;
-		const lp = lumAt(src, y * w + x);
+		const pi = y * w + x, lp = lumAt(src, pi);
 		const qx = x + sx * k, qy = y + sy * k;
-		const lq = lumAt(src, qy * w + qx);
+		const qi = qy * w + qx, lq = lumAt(src, qi);
 		const normal = { d: k - 1, bright: lp > lq };
 
-		// length of the run of q's tone, and the tone after it
-		let run = 1, la = null;
+		// length of the run of q's tone, and the pixel after it
+		let run = 1, ai = -1;
 		for (; run <= MAX_SEE_THROUGH; run++) {
 			const rx = x + sx * (k + run), ry = y + sy * (k + run);
 			if (rx < 0 || ry < 0 || rx >= w || ry >= h) break;
 			const ri = ry * w + rx;
 			if (src[ri * 4 + 3] === 0) break;
-			const lr = lumAt(src, ri);
-			if (Math.abs(lr - lq) > thr) { la = lr; break; }
+			if (toneDiff(src, ri, qi) > thr) { ai = ri; break; }
 		}
 
 		// Looking across a thin line between this tone and another one.
-		if (la !== null && Math.abs(la - lp) > thr) {
+		if (ai >= 0 && toneDiff(src, ai, pi) > thr) {
+			const la = lumAt(src, ai);
 			const lineBright = lq > lp && lq > la, lineDark = lq < lp && lq < la;
 			if (!lineBright && !lineDark) return normal;
 			const pBright = lp > la;
@@ -467,38 +518,39 @@
 		// one of them: no edge if that is this pixel's own tone, an edge if this
 		// pixel is the other tone. A finger of one region poking into another
 		// runs on into its region instead, and stays an ordinary edge.
-		const line = thinLine(src, w, h, qx, qy, sy, sx, lq, thr);
+		const line = thinLine(src, w, h, qx, qy, sy, sx, thr);
 		if (!line) return normal;
-		if (Math.abs(lp - line.own) <= thr) return null;
-		if (Math.abs(lp - line.other) <= thr) return { d: k - 1, bright: lp > line.own };
+		if (toneDiff(src, pi, line.own) <= thr) return null;
+		if (toneDiff(src, pi, line.other) <= thr) return { d: k - 1, bright: lp > lumAt(src, line.own) };
 		return normal;
 	}
 
 	/**
-	 * Is the pixel at (x, y), of luminance l, part of a run at most
-	 * MAX_SEE_THROUGH thick along (sx, sy), lying between two different tones
-	 * and lighter or darker than both? Returns { own, other }: the luminance of
-	 * the side the line belongs to (the brighter one for a light line, the
-	 * darker one for a dark line) and of the other side. Otherwise null.
+	 * Is the pixel at (x, y) part of a run at most MAX_SEE_THROUGH thick along
+	 * (sx, sy), lying between two different tones and lighter or darker than
+	 * both? Returns { own, other }: a pixel of the side the line belongs to
+	 * (the brighter one for a light line, the darker one for a dark line) and
+	 * a pixel of the other side. Otherwise null.
 	 */
-	function thinLine(src, w, h, x, y, sx, sy, l, thr) {
+	function thinLine(src, w, h, x, y, sx, sy, thr) {
+		const ci = y * w + x;
 		const end = (dir) => {
 			for (let k = 1; k <= MAX_SEE_THROUGH + 1; k++) {
 				const rx = x + dir * sx * k, ry = y + dir * sy * k;
 				if (rx < 0 || ry < 0 || rx >= w || ry >= h) return null;
 				const ri = ry * w + rx;
 				if (src[ri * 4 + 3] === 0) return null;
-				const lr = lumAt(src, ri);
-				if (Math.abs(lr - l) > thr) return { k, l: lr };
+				if (toneDiff(src, ri, ci) > thr) return { k, i: ri, l: lumAt(src, ri) };
 			}
 			return null;
 		};
 		const a = end(-1), b = end(1);
 		if (!a || !b || a.k + b.k - 1 > MAX_SEE_THROUGH) return null;
-		if (Math.abs(a.l - b.l) <= thr) return null;
-		const hi = Math.max(a.l, b.l), lo = Math.min(a.l, b.l);
-		if (l > hi) return { own: hi, other: lo };
-		if (l < lo) return { own: lo, other: hi };
+		if (toneDiff(src, a.i, b.i) <= thr) return null;
+		const l = lumAt(src, ci);
+		const [hi, lo] = a.l > b.l ? [a, b] : [b, a];
+		if (l > hi.l) return { own: hi.i, other: lo.i };
+		if (l < lo.l) return { own: lo.i, other: hi.i };
 		return null;
 	}
 
@@ -731,6 +783,15 @@
 		const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
 		for (const key in DEFAULTS) if (key in stored) settings[key] = stored[key];
 		if (!settings.preset_options || typeof settings.preset_options !== 'object') settings.preset_options = {};
+		if (!('grow_mode' in stored) && stored.use_brush_color === false) settings.grow_mode = 'both';
+		if (!['brush', 'start', 'both'].includes(settings.grow_mode)) settings.grow_mode = 'brush';
+		// version 2 compares tones by colour channel and lowered the edge threshold
+		// default from 4 to 2: move the old default along with it
+		if (!stored.settings_version || stored.settings_version < 2) {
+			if (settings.threshold === 4) settings.threshold = DEFAULTS.threshold;
+			settings.settings_version = 2;
+			localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+		}
 	} catch (e) {}
 	function saveSettings() {
 		try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) {}
@@ -1141,7 +1202,7 @@
 	}
 
 	/** Starts the per-stroke state for a texture, with a snapshot of it where the mode needs one. */
-	function startCache(texture, color, mode) {
+	function startCache(texture, color, mode, opts) {
 		const canvas = getCanvas(texture);
 		const w = canvas.width, h = canvas.height;
 		cache = {
@@ -1163,7 +1224,14 @@
 		cache.source = sourceLayer(data, w, h);
 		const name = selectedPresetName(mode);
 		if (mode === 'edge') {
-			cache.target = settings.use_brush_color ? color : null;
+			cache.target = null;
+			if (settings.grow_mode === 'brush') cache.target = color;
+			if (settings.grow_mode === 'start') {
+				// the tone under the brush where the stroke starts
+				const sx = Math.floor(opts && opts.x), sy = Math.floor(opts && opts.y);
+				const si = (sy * w + sx) * 4;
+				cache.target = sx >= 0 && sy >= 0 && sx < w && sy < h && data[si + 3] ? [data[si], data[si + 1], data[si + 2]] : color;
+			}
 			cache.preset = selectedPreset('edge');
 			cache.presetOpt = presetOptions('edge', cache.preset ? name : '');
 			cache.levels = { both: [cache.source], h: [cache.source], v: [cache.source] };
@@ -1267,7 +1335,7 @@
 		const color = getBrushColor(opts);
 		if (!cache || cache.mode !== activeMode || cache.texture !== texture || !sameColor(cache.color, color)) {
 			if (!color && activeMode !== 'edge') return px;
-			startCache(texture, color, activeMode);
+			startCache(texture, color, activeMode, opts);
 		}
 		trackBrush(opts);
 		if (x < 0 || y < 0 || x >= cache.w || y >= cache.h) return px;
@@ -1320,7 +1388,7 @@
 		const P = selectedPreset(kind);
 		const opt = presetOptions(kind, P ? name : '');
 		if (kind === 'edge') {
-			const target = settings.use_brush_color ? [150, 150, 150] : null;
+			const target = settings.grow_mode === 'both' ? null : [150, 150, 150];
 			return imageToUrl(processImage(d, w, h, settings, target, P, 1, opt), w, h);
 		}
 		const col = getBrushColor(null) || (kind === 'highlight' ? [230, 230, 230] : [20, 20, 20]);
@@ -1360,7 +1428,7 @@
 		const P = selectedPreset(kind);
 		const opt = presetOptions(kind, P ? selectedPresetName(kind) : '');
 		if (kind === 'edge') {
-			return imageToUrl(processImage(data, w, h, settings, settings.use_brush_color ? color : null, P, 1, opt), w, h);
+			return imageToUrl(processImage(data, w, h, settings, settings.grow_mode === 'both' ? null : color, P, 1, opt), w, h);
 		}
 		if (!color) return '';
 		return imageToUrl(processLines(data, w, h, settings, P, opt, color), w, h);
@@ -1375,6 +1443,7 @@
 			const mode = activeMode;
 			vue.mode = mode;
 			vue.is_app = isApp;
+			vue.grow_mode = settings.grow_mode;
 			vue.noise = {
 				density: settings.noise_density, falloff: settings.noise_falloff,
 				grain: settings.noise_grain, seed: settings.noise_seed
@@ -1422,7 +1491,8 @@
 			title: 'Edge Noise Brush',
 			width: 440,
 			form: {
-				use_brush_color: { label: 'Grow brush colour only', type: 'checkbox', value: s.use_brush_color },
+				grow_mode: { label: 'Grows', type: 'select', value: s.grow_mode, options: {
+					brush: 'Brush colour', start: 'Colour where the stroke starts', both: 'Both tones' } },
 				color_tolerance: { label: 'Colour tolerance', type: 'number', value: s.color_tolerance, min: 0, max: 64 },
 				grow_on_repeat: { label: 'Grow on repeated passes', type: 'checkbox', value: s.grow_on_repeat,
 					description: 'Going back over a spot without letting go grows it another step.' },
@@ -1741,7 +1811,8 @@
 						sample_url: '',
 						texture_url: '',
 						texture_too_large: false,
-						noise: { density: 0, falloff: 0, grain: 1, seed: 1 }
+						noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
+						grow_mode: 'brush'
 					};
 				},
 				computed: {
@@ -1774,7 +1845,13 @@
 					openSettings,
 					refresh() { refreshPanel(); },
 					setNoise(key, event) { setNoiseSetting(key, event.target.value); },
-					setOption(key, value) { setPresetOption(this.mode, this.selected, key, value); }
+					setOption(key, value) { setPresetOption(this.mode, this.selected, key, value); },
+					setGrowMode(value) {
+						settings.grow_mode = value;
+						saveSettings();
+						clearCache();
+						refreshPanel();
+					}
 				},
 				template: `
 					<div class="edge_noise_panel">
@@ -1814,6 +1891,15 @@
 								No presets yet. Draw the specks and clumps you want over a plain background, select them and click the selection button above, or add them as a PNG.
 							</p>
 							<p class="edge_noise_error" v-if="selected_error">{{ selected_error }}</p>
+
+							<div class="edge_noise_slider" v-if="mode === 'edge'" title="Which tone the brush grows into its neighbour.">
+								<span>Grows</span>
+								<select :value="grow_mode" @change="setGrowMode($event.target.value)">
+									<option value="brush">Brush colour</option>
+									<option value="start">Colour where the stroke starts</option>
+									<option value="both">Both tones</option>
+								</select>
+							</div>
 
 							<template v-if="show_options">
 								<template v-if="mode === 'edge'">
@@ -2033,7 +2119,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.10.0',
+		version: '0.11.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
