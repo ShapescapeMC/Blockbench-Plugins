@@ -13,8 +13,11 @@
 
 ### 2. Open it
 
-Switch to the Paint tab. The brush is in the paint toolbar with the other brushes, shown with a grain icon.
+Switch to the Paint tab and click the small arrow on the Brush tool in the toolbox. Pick `Edge Noise Brush` from the dropdown. The Brush tool's icon changes to a grain icon while it is active, and the Edge Noise Brush panel opens on the right.
+
+The first time, Blockbench asks for permission for the plugin to use its preset folder. Choose `Always allow for this plugin`.
 
 ## Requirements
 
-- Blockbench 5.0 or newer. Works in both the desktop app and the web version.
+- Blockbench 5.0 or newer.
+- The preset folder needs the desktop app. In the web version presets are kept in the browser instead.

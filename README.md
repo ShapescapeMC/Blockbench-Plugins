@@ -11,7 +11,7 @@ This plugin renders the model you have open into finished images and GIFs: still
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
 ### Edge Noise Brush
-This plugin adds a paint tool that breaks up straight edges between two tones into random pixel steps, using only the colours already on either side. By default only the selected paint colour grows into its neighbour, and painting over the same spot twice in one stroke does not stack.
+This plugin adds a mode to the Brush tool that breaks up straight edges between two tones into pixel steps, using only the colours already on either side. The steps are random or follow your own presets, PNGs showing the edge you want, and a panel previews the result on the selected texture.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/edge_noise_brush/about.html)
 
