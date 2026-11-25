@@ -1522,8 +1522,43 @@
 
 		/** How far the edge steps reach from the line, in pixels, before any growth. */
 		function lineReach() {
-			return cache.preset ? cache.preset.height * Math.max(1, Number(cache.presetOpt && cache.presetOpt.depth) || 1)
+			return lineReachFor(cache.preset, cache.presetOpt);
+		}
+
+		function lineReachFor(preset, presetOpt) {
+			return preset ? preset.height * Math.max(1, Number(presetOpt && presetOpt.depth) || 1)
 				: Math.max(1, settings.step_depth | 0);
+		}
+
+		/**
+		 * While hovering with the Edge Noise Brush on block lines, highlights the
+		 * stretch of line the brush would work on, so it shows before painting and
+		 * goes away when the cursor leaves the model.
+		 */
+		let hoverLineKey = null;
+		function hoverGridLine(data) {
+			const element = data && data.type === 'element' && data.element;
+			const faceKey = data && data.face;
+			const face = element && element.faces && element.faces[faceKey];
+			const hit = data && data.intersects && data.intersects[0];
+			const texture = face && typeof face.getTexture === 'function' && face.getTexture();
+			if (!texture || !hit || !hit.uv || typeof Painter.getCanvasToolPixelCoords !== 'function') {
+				clearLineMarker();
+				return;
+			}
+			const [x, y] = Painter.getCanvasToolPixelCoords(hit.uv, texture);
+			const grid = currentGrid(texture, element, faceKey);
+			const line = nearestGridLine(x, y, grid, null);
+			const across = line.axis === 'x' ? x : y, along = line.axis === 'x' ? y : x;
+			const side = across + 0.5 >= line.pos ? 1 : -1;
+			const g = grid[line.axis === 'x' ? 'y' : 'x'];
+			const segment = Math.floor((along + 0.5 - g.anchor) / g.cell);
+			const key = [element.uuid, faceKey, line.axis, line.pos, side, segment, settings.edge_line_place].join('/');
+			if (key === hoverLineKey && lineMarker) return;
+			const preset = selectedPreset('edge');
+			const reach = lineReachFor(preset, presetOptions('edge', preset ? selectedPresetName('edge') : ''));
+			markGridLine(line, texture, { side, from: g.anchor + segment * g.cell, to: g.anchor + (segment + 1) * g.cell, reach }, element, faceKey);
+			hoverLineKey = key;
 		}
 
 		function noisePixel(x, y, px, alpha, opts) {
@@ -1841,12 +1876,13 @@
 		let gridFilled = new Set();
 
 		/** The grid to paint on for the face under the brush: { x: {anchor, cell}, y: {anchor, cell} }. */
-		function currentGrid(texture) {
+		function currentGrid(texture, onElement, onFace) {
 			const fixed = Number(settings.grid_size);
 			const auto = settings.grid_size === 'auto' || !(fixed > 0);
 			let gx = null, gy = null;
-			const element = typeof Painter !== 'undefined' && Painter.current && Painter.current.element;
-			const faceKey = Painter.current && Painter.current.face;
+			// the face given, or else the face the painter is on
+			const element = onElement || (typeof Painter !== 'undefined' && Painter.current && Painter.current.element);
+			const faceKey = onElement ? onFace : Painter.current && Painter.current.face;
 			const face = element && element.faces && element.faces[faceKey];
 			if (settings.grid_follow_model && face && element.from && element.to && Array.isArray(face.uv) && FACE_AXES[faceKey]) {
 				const rot = face.rotation || 0;
@@ -1899,7 +1935,13 @@
 			if (key === 'grid_size') settings.grid_size = value === 'auto' ? 'auto' : Math.max(1, Math.min(256, Math.round(Number(value)) || 16));
 			if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
 			if (key === 'grid_show') settings.grid_show = !!value;
-			if (key === 'edge_on_grid') { settings.edge_on_grid = !!value; clearCache(); if (!value) clearLineMarker(); }
+			if (key === 'edge_on_grid') {
+				settings.edge_on_grid = !!value;
+				// switching it on ticks Block grid once, so the lines show; unticking that hides them again
+				if (value) settings.grid_show_modes = Object.assign({}, settings.grid_show_modes, { edge: true });
+				clearCache();
+				if (!value) clearLineMarker();
+			}
 			if (key === 'edge_line_place' && ['center', 'inner', 'outer'].includes(value)) { settings.edge_line_place = value; clearCache(); clearLineMarker(); }
 			if (key === 'grid_show_here' && activeMode) settings.grid_show_modes = Object.assign({}, settings.grid_show_modes, { [activeMode]: !!value });
 			saveSettings();
@@ -1924,8 +1966,7 @@
 		/** Whether the grid should show: Block Grid Brush active, Brush tool in hand, Paint mode. */
 		function gridOverlayWanted() {
 			if (!activeMode) return false;
-			const shown = activeMode === 'grid' ? settings.grid_show
-				: settings.grid_show_modes[activeMode] || (activeMode === 'edge' && settings.edge_on_grid);
+			const shown = activeMode === 'grid' ? settings.grid_show : settings.grid_show_modes[activeMode];
 			if (!shown) return false;
 			if (typeof Modes !== 'undefined' && !Modes.paint) return false;
 			const brush = BarItems.brush_tool;
@@ -1990,23 +2031,23 @@
 		const MARKER_COLOR = '#ffd23f';
 
 		function clearLineMarker() {
+			hoverLineKey = null;
 			if (!lineMarker) return;
 			if (lineMarker.parent) lineMarker.parent.remove(lineMarker);
 			lineMarker.geometry.dispose();
 			lineMarker = null;
 		}
 
-		/** Highlights the chosen block line on the face being painted, across the whole face. */
 		/**
 		 * Highlights where the noise goes: the stretch of the chosen line beside
 		 * the block the brush is in, as wide as the band the steps can reach on
 		 * the chosen side. band: { side, from, to, reach } in texture pixels.
 		 */
-		function markGridLine(line, texture, band) {
+		function markGridLine(line, texture, band, onElement, onFace) {
 			clearLineMarker();
 			if (typeof THREE === 'undefined' || !texture || !band) return;
-			const cube = Painter.current && Painter.current.element;
-			const faceKey = Painter.current && Painter.current.face;
+			const cube = onElement || (Painter.current && Painter.current.element);
+			const faceKey = onElement ? onFace : Painter.current && Painter.current.face;
 			const face = cube && cube.faces && cube.faces[faceKey];
 			const plane = FACE_PLANES[faceKey];
 			if (!face || !cube.mesh || !plane || !cube.from || !(face.rotation === 0 || face.rotation === 180 || !face.rotation)) return;
@@ -2028,7 +2069,7 @@
 			const alongLo = clampTo(l0.axis, Math.min(l0.value, l1.value)), alongHi = clampTo(l0.axis, Math.max(l0.value, l1.value));
 			size[l0.axis] = Math.max(0.35, alongHi - alongLo); centre[l0.axis] = (alongLo + alongHi) / 2;
 			size[n] = 0.06; centre[n] = cube[end][n] + out * 0.05;
-			if (!markerMaterial) markerMaterial = new THREE.MeshBasicMaterial({ color: MARKER_COLOR, transparent: true, opacity: 0.7 });
+			if (!markerMaterial) markerMaterial = new THREE.MeshBasicMaterial({ color: MARKER_COLOR, transparent: true, opacity: 0.35, depthWrite: false });
 			lineMarker = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), markerMaterial);
 			lineMarker.name = 'edge_noise_block_line';
 			lineMarker.position.set(centre[0] - cube.origin[0], centre[1] - cube.origin[1], centre[2] - cube.origin[2]);
@@ -2551,7 +2592,15 @@
 				structure: menu && menu.structure,
 				loadBrushPreset: Painter.loadBrushPreset,
 				onSelect: tool.onSelect,
-				onUnselect: tool.onUnselect
+				onUnselect: tool.onUnselect,
+				onCanvasMouseMove: tool.onCanvasMouseMove
+			};
+
+			// hovering shows the block line the Edge Noise Brush would work on
+			tool.onCanvasMouseMove = function (data) {
+				if (activeMode === 'edge' && settings.edge_on_grid && !cache) hoverGridLine(data);
+				else if (!cache && lineMarker) clearLineMarker();
+				if (original.onCanvasMouseMove) return original.onCanvasMouseMove.apply(this, arguments);
 			};
 
 			// the block grid follows the Brush tool being picked up and put down
@@ -2561,6 +2610,7 @@
 			};
 			tool.onUnselect = function () {
 				updateGridOverlay();
+				clearLineMarker();
 				if (original.onUnselect) return original.onUnselect.apply(this, arguments);
 			};
 
@@ -2620,6 +2670,7 @@
 				delete tool.brush.draw;
 				tool.onSelect = original.onSelect;
 				tool.onUnselect = original.onUnselect;
+				tool.onCanvasMouseMove = original.onCanvasMouseMove;
 				if (tool.side_menu && original.structure) tool.side_menu.structure = original.structure;
 				if (tool.setIcon) tool.setIcon(original.icon);
 			}
@@ -3263,7 +3314,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.3.0',
+		version: '1.4.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
