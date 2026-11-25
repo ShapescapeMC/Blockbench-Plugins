@@ -9,6 +9,15 @@ Usage <render_model/usage>
 
 ```{toctree}
 :hidden:
+:caption: Block Grid Modeler
+
+About <block_grid_modeler/about>
+Installation <block_grid_modeler/installation>
+Usage <block_grid_modeler/usage>
+```
+
+```{toctree}
+:hidden:
 :caption: System Template File Loading
 
 About <system_template_file_loader/about>
@@ -26,6 +35,11 @@ This repository hosts a set of custom plugins for the open-source 3D modelling s
 This plugin renders the model you have open into finished images and GIFs: still PNGs from preset camera angles, a looping turntable, and a looping GIF per animation, at one or more resolutions in a single pass. Animations can be layered, so an idle or a blink plays over a walk cycle, views and animations can be grouped into labelled sheets, and every run writes into its own folder.
 
 [Learn More](./render_model/about.md)
+
+### Block Grid Modeler
+This plugin adds a tool for building models out of whole blocks: point at a face and click to add a cube against it or cut one out of it, snapped to the model's block grid at 4 to 64 units. New cubes are named `ADD` or `CUTOUT` so a build script can process them.
+
+[Learn More](./block_grid_modeler/about.md)
 
 ### System Template File Loader
 This plugin allows for easy importing of PNG and animation files into a project when the geometry file is located in the same directory as the other files. For example, when using a custom folder structure in the Regolith filter system template. It can currently read files from the same directory or from subdirectories.

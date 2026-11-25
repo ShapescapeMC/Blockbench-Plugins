@@ -10,6 +10,11 @@ This plugin renders the model you have open into finished images and GIFs: still
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
+### Block Grid Modeler
+This plugin adds a tool for building models out of whole blocks: point at a face and click to add a cube against it or cut one out of it, snapped to the model's block grid at 4 to 64 units. New cubes are named `ADD` or `CUTOUT` so a build script can process them.
+
+[Learn More](https://blockbench-plugins.readthedocs.io/en/latest/block_grid_modeler/about.html)
+
 ### System Template File Loader
 This plugin allows for easy importing of PNG and animation files into a project when the geometry file is located in the same directory as the other files. For example, when using a custom folder structure in the Regolith filter system template. It can currently read files from the same directory or from subdirectories.
 
