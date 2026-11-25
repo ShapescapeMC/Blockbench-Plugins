@@ -403,6 +403,90 @@
 		return { period: W, rows, bits };
 	}
 
+	// Thickest line the highlight and shadow brushes look through to find the edge behind it.
+	const MAX_SEE_THROUGH = 8;
+
+	/**
+	 * Finds the edge seen from pixel (x, y) looking along (sx, sy), for the
+	 * highlight and shadow brushes. Returns { d, bright } or null: d is how
+	 * many pixels lie between this pixel and the edge (0 = touching it), and
+	 * bright is whether this pixel is on the brighter side.
+	 *
+	 * A thin line that is brighter or darker than the tones on both sides of
+	 * it, such as a highlight or shadow drawn earlier, is looked through: it
+	 * counts as part of the brighter side if it is brighter than both, and of
+	 * the darker side if it is darker than both. So a shadow brushed over a
+	 * highlight lands next to the highlight, not around it, and brushing a
+	 * line again does not thicken it.
+	 */
+	function lineEdge(src, w, h, x, y, sx, sy, reach, thr) {
+		const k = scan(src, w, h, x, y, sx, sy, reach, thr);
+		if (k < 0) return null;
+		const lp = lumAt(src, y * w + x);
+		const qx = x + sx * k, qy = y + sy * k;
+		const lq = lumAt(src, qy * w + qx);
+		const normal = { d: k - 1, bright: lp > lq };
+
+		// length of the run of q's tone, and the tone after it
+		let run = 1, la = null;
+		for (; run <= MAX_SEE_THROUGH; run++) {
+			const rx = x + sx * (k + run), ry = y + sy * (k + run);
+			if (rx < 0 || ry < 0 || rx >= w || ry >= h) break;
+			const ri = ry * w + rx;
+			if (src[ri * 4 + 3] === 0) break;
+			const lr = lumAt(src, ri);
+			if (Math.abs(lr - lq) > thr) { la = lr; break; }
+		}
+
+		// Looking across a thin line between this tone and another one.
+		if (la !== null && Math.abs(la - lp) > thr) {
+			const lineBright = lq > lp && lq > la, lineDark = lq < lp && lq < la;
+			if (!lineBright && !lineDark) return normal;
+			const pBright = lp > la;
+			// the line sits on this pixel's side of the edge if it belongs to the same side
+			return { d: lineBright === pBright ? k - 1 + run : k - 1, bright: pBright };
+		}
+
+		// Otherwise this pixel may be looking along a line, at its end. If,
+		// across, the run is a thin line between two other tones, it belongs to
+		// one of them: no edge if that is this pixel's own tone, an edge if this
+		// pixel is the other tone. A finger of one region poking into another
+		// runs on into its region instead, and stays an ordinary edge.
+		const line = thinLine(src, w, h, qx, qy, sy, sx, lq, thr);
+		if (!line) return normal;
+		if (Math.abs(lp - line.own) <= thr) return null;
+		if (Math.abs(lp - line.other) <= thr) return { d: k - 1, bright: lp > line.own };
+		return normal;
+	}
+
+	/**
+	 * Is the pixel at (x, y), of luminance l, part of a run at most
+	 * MAX_SEE_THROUGH thick along (sx, sy), lying between two different tones
+	 * and lighter or darker than both? Returns { own, other }: the luminance of
+	 * the side the line belongs to (the brighter one for a light line, the
+	 * darker one for a dark line) and of the other side. Otherwise null.
+	 */
+	function thinLine(src, w, h, x, y, sx, sy, l, thr) {
+		const end = (dir) => {
+			for (let k = 1; k <= MAX_SEE_THROUGH + 1; k++) {
+				const rx = x + dir * sx * k, ry = y + dir * sy * k;
+				if (rx < 0 || ry < 0 || rx >= w || ry >= h) return null;
+				const ri = ry * w + rx;
+				if (src[ri * 4 + 3] === 0) return null;
+				const lr = lumAt(src, ri);
+				if (Math.abs(lr - l) > thr) return { k, l: lr };
+			}
+			return null;
+		};
+		const a = end(-1), b = end(1);
+		if (!a || !b || a.k + b.k - 1 > MAX_SEE_THROUGH) return null;
+		if (Math.abs(a.l - b.l) <= thr) return null;
+		const hi = Math.max(a.l, b.l), lo = Math.min(a.l, b.l);
+		if (l > hi) return { own: hi, other: lo };
+		if (l < lo) return { own: lo, other: hi };
+		return null;
+	}
+
 	/** A plain unbroken one pixel line, used when no line preset is selected. */
 	const SOLID_LINE = { period: 1, rows: 1, bits: new Uint8Array([1]) };
 
@@ -432,27 +516,22 @@
 		}
 
 		return {
-			reach,
+			reach: reach + 2 * (MAX_SEE_THROUGH + 1),
 			run(src, out, w, h, x0, y0, x1, y1) {
 				const [cr, cg, cb] = color;
 				for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
 					const i = y * w + x;
 					if (src[i * 4 + 3] === 0) continue;
-					const li = lumAt(src, i);
 					let paint = false;
 					for (const [dx, dy] of axes) {
 						const u = dx === 0 ? x : y;
-						const kBack = scan(src, w, h, x, y, -dx, -dy, reach, thr);
-						const kFwd = scan(src, w, h, x, y, dx, dy, reach, thr);
-						const order = [];
-						if (kBack > 0) order.push([kBack, -1]);
-						if (kFwd > 0) order.push([kFwd, 1]);
-						if (order.length === 2 && kFwd < kBack) order.reverse();
-						for (const [k, side] of order) {
-							const q = (y + side * dy * k) * w + (x + side * dx * k);
+						const back = lineEdge(src, w, h, x, y, -dx, -dy, reach, thr);
+						const fwd = lineEdge(src, w, h, x, y, dx, dy, reach, thr);
+						const order = [back, fwd].filter(Boolean).sort((a, b) => a.d - b.d);
+						for (const edge of order) {
 							// only edges where this pixel is on the chosen side
-							if ((li > lumAt(src, q)) !== onBright) continue;
-							paint = lineAt(u, k - 1 - offset);
+							if (edge.bright !== onBright) continue;
+							paint = lineAt(u, edge.d - offset);
 							break;
 						}
 						if (paint) break;
@@ -1441,7 +1520,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.7.0',
+		version: '0.7.1',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

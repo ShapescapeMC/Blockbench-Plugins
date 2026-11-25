@@ -121,4 +121,6 @@ Each line preset, and the plain line, keeps its own options in the panel:
 - `Flip`: puts the bottom of the preset against the edge instead of the top.
 - `Length`: stretches the pattern along the edge.
 
+Lines drawn earlier are taken into account. A highlight counts as part of the brighter side of its edge and a shadow as part of the darker side, so a shadow brushed over a highlight lands right under it rather than around it, and brushing over a line again leaves it as it is. This works for lines up to 8 pixels thick that are brighter or darker than both tones they sit between.
+
 The `Horizontal edges`, `Vertical edges` and `Edge threshold` settings apply to these brushes too. `Follow stroke direction` does not: the line always follows both the flat runs and the steps of an edge, so it stays joined up.
