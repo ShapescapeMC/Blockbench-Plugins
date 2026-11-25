@@ -47,7 +47,8 @@
 		reference_selected: '', // id of the reference shown, '' = the whole selected texture
 		settings_version: 2,
 		grid_size: 16,        // Block Grid Brush cell size in texture pixels, or 'auto' for the model's own block size
-		grid_follow_model: true // line cells up with the model's block grid rather than the texture's corner
+		grid_follow_model: true, // line cells up with the model's block grid rather than the texture's corner
+		grid_show: true       // draw the block grid on the model while the Block Grid Brush is selected
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -812,6 +813,51 @@
 		return { anchor: uvAtEdge * factor, block: Math.abs(16 / unitsPerUV) * factor };
 	}
 
+	// Which side of the cube each face is on: [model axis, 'from' or 'to', outward direction].
+	const FACE_PLANES = {
+		north: [2, 'from', -1], south: [2, 'to', 1], west: [0, 'from', -1],
+		east: [0, 'to', 1], down: [1, 'from', -1], up: [1, 'to', 1]
+	};
+
+	/**
+	 * Line segments showing the Block Grid Brush's cells on a cube, in model
+	 * coordinates: a flat list of [x, y, z] pairs. Lines sit on each face at
+	 * the same places the brush puts cell edges, a hair outside the surface.
+	 * spacing(faceKey, modelAxis) gives the cell size in model units along
+	 * that axis of that face, or 0 to skip it. offset(modelAxis) is where
+	 * block edges sit (8 on centred grids for x and z).
+	 */
+	function gridLines(cube, faceKeys, spacing, offset, lift) {
+		const points = [];
+		const MAX_LINES = 256;
+		for (const faceKey of faceKeys) {
+			const axes = FACE_AXES[faceKey], plane = FACE_PLANES[faceKey];
+			if (!axes || !plane) continue;
+			const [n, end, out] = plane;
+			const depth = cube[end][n] + out * lift;
+			const along = [axes.u[0], axes.v[0]];
+			for (const a of along) {
+				const b = along[0] === a ? along[1] : along[0];
+				const step = spacing(faceKey, a);
+				if (!(step > 0)) continue;
+				const from = cube.from[a], to = cube.to[a];
+				const off = offset(a);
+				let p = Math.floor((from - off) / 16) * 16 + off;
+				let count = 0;
+				for (; p < to - 1e-6 && count < MAX_LINES; p += step) {
+					if (p <= from + 1e-6) continue;
+					const p1 = [0, 0, 0], p2 = [0, 0, 0];
+					p1[a] = p2[a] = p;
+					p1[b] = cube.from[b]; p2[b] = cube.to[b];
+					p1[n] = p2[n] = depth;
+					points.push(p1, p2);
+					count++;
+				}
+			}
+		}
+		return points;
+	}
+
 	/**
 	 * The cells to fill for a brush dab at (x, y) of size `size`, given the grid
 	 * along each axis ({ anchor, cell }). Returns [{ x, y, w, h, key }].
@@ -829,7 +875,7 @@
 	}
 
 	if (typeof module !== 'undefined' && module.exports) {
-		module.exports = { faceGridAxis, gridCells, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
+		module.exports = { faceGridAxis, gridCells, gridLines, processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
 	}
 	if (typeof Plugin === 'undefined') return;
 
@@ -1408,6 +1454,7 @@
 		clearCache();
 		const brush = BarItems.brush_tool;
 		if (brush && brush.setIcon) brush.setIcon(activeMode ? MODES[activeMode].icon : original.icon);
+		updateGridOverlay();
 		// colours the Brush tool's icon wherever it shows while one of these modes is on
 		document.body.classList.toggle('edge_noise_brush_active', !!activeMode);
 		// first use of a preset brush: ask for the preset folder
@@ -1507,7 +1554,7 @@
 				density: settings.noise_density, falloff: settings.noise_falloff,
 				grain: settings.noise_grain, seed: settings.noise_seed
 			};
-			vue.grid = { size: String(settings.grid_size), follow: settings.grid_follow_model };
+			vue.grid = { size: String(settings.grid_size), follow: settings.grid_follow_model, show: settings.grid_show };
 			if (!mode || mode === 'grid') return;
 			try {
 				const kind = mode;
@@ -1723,8 +1770,88 @@
 	function setGridSetting(key, value) {
 		if (key === 'grid_size') settings.grid_size = value === 'auto' ? 'auto' : Math.max(1, Math.min(256, Math.round(Number(value)) || 16));
 		if (key === 'grid_follow_model') settings.grid_follow_model = !!value;
+		if (key === 'grid_show') settings.grid_show = !!value;
 		saveSettings();
 		refreshPanel();
+		updateGridOverlay();
+	}
+
+	/* --- block grid shown on the model --- */
+
+	let gridOverlay = [];       // line objects added to cube meshes
+	let gridMaterial = null;
+	let gridTimer = null;
+
+	function clearGridOverlay() {
+		for (const lines of gridOverlay) {
+			if (lines.parent) lines.parent.remove(lines);
+			lines.geometry.dispose();
+		}
+		gridOverlay = [];
+	}
+
+	/** Whether the grid should show: Block Grid Brush active, Brush tool in hand, Paint mode. */
+	function gridOverlayWanted() {
+		if (activeMode !== 'grid' || !settings.grid_show) return false;
+		if (typeof Modes !== 'undefined' && !Modes.paint) return false;
+		const brush = BarItems.brush_tool;
+		// holding Alt swaps to the colour picker for a moment: keep the grid up
+		return typeof Toolbox !== 'undefined' && (Toolbox.selected === brush || Toolbox.original === brush);
+	}
+
+	function buildGridOverlay() {
+		clearGridOverlay();
+		if (!gridOverlayWanted() || typeof Cube === 'undefined' || typeof THREE === 'undefined') return;
+		if (!gridMaterial) {
+			gridMaterial = new THREE.LineBasicMaterial({ color: ICON_COLOR, transparent: true, opacity: 0.85 });
+		}
+		const centred = typeof Format !== 'undefined' && Format.centered_grid;
+		const fixed = Number(settings.grid_size);
+		const auto = settings.grid_size === 'auto' || !(fixed > 0);
+		const offset = (axis) => centred && axis !== 1 ? 8 : 0;
+		for (const cube of Cube.all) {
+			if (!cube.mesh || cube.visibility === false) continue;
+			const faceKeys = Object.keys(FACE_AXES).filter(key => {
+				const face = cube.faces[key];
+				// skip disabled faces, and faces turned by 90 or 270 degrees, which the brush does not line up either
+				return face && face.texture !== null && !(face.rotation === 90 || face.rotation === 270);
+			});
+			const spacing = (faceKey, axis) => {
+				// without snapping, cells start at the texture's corner and do not follow the model
+				if (!settings.grid_follow_model) return 0;
+				if (auto) return 16;
+				// a fixed cell size in pixels: how many model units that is on this face
+				const face = cube.faces[faceKey];
+				const tex = face.getTexture && face.getTexture();
+				const isU = FACE_AXES[faceKey].u[0] === axis;
+				const factor = tex ? (isU ? tex.width / tex.getUVWidth() : tex.display_height / tex.getUVHeight()) : 1;
+				const uvSpan = Math.abs(isU ? face.uv[2] - face.uv[0] : face.uv[3] - face.uv[1]);
+				const extent = cube.to[axis] - cube.from[axis];
+				if (!uvSpan || !extent) return 0;
+				return fixed / (uvSpan * factor / extent);
+			};
+			const points = gridLines(cube, faceKeys, spacing, offset, 0.02);
+			if (!points.length) continue;
+			const flat = new Float32Array(points.length * 3);
+			points.forEach((p, i) => {
+				flat[i * 3] = p[0] - cube.origin[0];
+				flat[i * 3 + 1] = p[1] - cube.origin[1];
+				flat[i * 3 + 2] = p[2] - cube.origin[2];
+			});
+			const geometry = new THREE.BufferGeometry();
+			geometry.setAttribute('position', new THREE.BufferAttribute(flat, 3));
+			const lines = new THREE.LineSegments(geometry, gridMaterial);
+			lines.name = 'edge_noise_block_grid';
+			lines.renderOrder = 2;
+			cube.mesh.add(lines);
+			gridOverlay.push(lines);
+		}
+	}
+
+	/** Rebuilds the grid shortly, once a burst of changes has settled. */
+	function updateGridOverlay() {
+		clearTimeout(gridTimer);
+		gridTimer = setTimeout(buildGridOverlay, 50);
 	}
 
 	function createReferencePanel() {
@@ -1938,7 +2065,7 @@
 						texture_too_large: false,
 						noise: { density: 0, falloff: 0, grain: 1, seed: 1 },
 						grow_mode: 'brush',
-						grid: { size: '16', follow: true }
+						grid: { size: '16', follow: true, show: true }
 					};
 				},
 				computed: {
@@ -1997,6 +2124,10 @@
 							<div class="edge_noise_slider" title="Line the cells up with the model's block grid on the face you paint. Off: cells start at the top left corner of the texture.">
 								<span>Snap to model</span>
 								<input type="checkbox" :checked="grid.follow" @change="setGrid('grid_follow_model', $event.target.checked)">
+							</div>
+							<div class="edge_noise_slider" title="Draw the cells on the model while this brush is selected.">
+								<span>Show grid</span>
+								<input type="checkbox" :checked="grid.show" @change="setGrid('grid_show', $event.target.checked)">
 							</div>
 							<p class="edge_noise_hint">Fills every block cell the brush touches with the brush colour. Paint on the model to line the cells up with its blocks. Brush size decides how many cells one dab covers, and opacity applies once per cell in each stroke.</p>
 						</template>
@@ -2202,7 +2333,19 @@
 			onStrokeStart: tool.brush.onStrokeStart,
 			onStrokeEnd: tool.brush.onStrokeEnd,
 			structure: menu && menu.structure,
-			loadBrushPreset: Painter.loadBrushPreset
+			loadBrushPreset: Painter.loadBrushPreset,
+			onSelect: tool.onSelect,
+			onUnselect: tool.onUnselect
+		};
+
+		// the block grid follows the Brush tool being picked up and put down
+		tool.onSelect = function () {
+			updateGridOverlay();
+			if (original.onSelect) return original.onSelect.apply(this, arguments);
+		};
+		tool.onUnselect = function () {
+			updateGridOverlay();
+			if (original.onUnselect) return original.onUnselect.apply(this, arguments);
 		};
 
 		tool.brush.changePixel = function (px, py, pxcolor, local_opacity, opts) {
@@ -2259,6 +2402,8 @@
 			tool.brush.onStrokeStart = original.onStrokeStart;
 			tool.brush.onStrokeEnd = original.onStrokeEnd;
 			delete tool.brush.draw;
+			tool.onSelect = original.onSelect;
+			tool.onUnselect = original.onUnselect;
 			if (tool.side_menu && original.structure) tool.side_menu.structure = original.structure;
 			if (tool.setIcon) tool.setIcon(original.icon);
 		}
@@ -2271,7 +2416,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.12.0',
+		version: '0.13.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
@@ -2292,6 +2437,10 @@
 			for (const event of ['update_texture_selection', 'finished_edit', 'change_color', 'select_mode']) {
 				listeners.push(Blockbench.on(event, refreshIfActive));
 			}
+			// the block grid follows the model, the mode and the textures
+			for (const event of ['update_view', 'finished_edit', 'undo', 'redo', 'select_mode', 'select_project', 'update_visibility']) {
+				listeners.push(Blockbench.on(event, () => { if (activeMode === 'grid' || gridOverlay.length) updateGridOverlay(); }));
+			}
 			// the reference view follows edits and the selected texture
 			for (const event of ['update_texture_selection', 'finished_edit', 'undo', 'redo', 'select_project']) {
 				listeners.push(Blockbench.on(event, refreshReference));
@@ -2306,6 +2455,9 @@
 			document.removeEventListener('pointerup', clearCache, true);
 			listeners.forEach(l => l && l.delete && l.delete());
 			listeners.length = 0;
+			clearTimeout(gridTimer);
+			clearGridOverlay();
+			if (gridMaterial) gridMaterial.dispose();
 			unhookBrushTool();
 			document.body.classList.remove('edge_noise_brush_active');
 			if (panel) panel.delete();

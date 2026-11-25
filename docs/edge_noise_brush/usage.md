@@ -176,6 +176,7 @@ The panel has two settings:
 
 - `Block size`: how big one cell is in texture pixels: 8, 16, 32, 64 or 128. `Auto` uses the size of one block on the face you are painting, from its UV, so it matches the model exactly even if faces differ in texture density.
 - `Snap to model`: on by default. Turn it off, or paint in the UV editor, and the cells start at the top left corner of the texture instead.
+- `Show grid`: on by default. While the Block Grid Brush is active and the Brush tool is selected, the cells are drawn on the model in red, on every cube face, exactly where the brush will fill them. They follow `Block size`, update as you edit the model, and disappear when you pick another tool or brush. With `Snap to model` off there is no grid on the model, since the cells then follow the texture rather than the blocks.
 
 Brush size decides how many cells one dab covers: at size 1 it fills the cell under the cursor. Brush opacity applies once per cell in each stroke, so going over a cell again in the same stroke does not darken it further. Hold Alt to pick a colour, as with the normal brush.
 
