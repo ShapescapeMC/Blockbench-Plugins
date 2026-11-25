@@ -2685,16 +2685,22 @@
 		'use strict';
 
 		const DEFAULTS = {
-			mode: 'add',          // 'add' or 'cutout'
-			size: 16,             // cube size in model units, 16 = one block
-			add_name: 'ADD',      // name given to cubes made in Add mode
-			cutout_name: 'CUTOUT', // name given to cubes made in Cut out mode
-			cutout_inflate: 0.025 // how much cut-out cubes are inflated
+			mode: 'add',            // 'add', 'cutout' or 'hollow'
+			size: 16,               // cube size in model units, 16 = one block
+			add_name: 'ADD',        // name given to cubes made in Add mode
+			cutout_name: 'CUTOUT',  // name given to cubes made in Cut out mode
+			hollow_name: 'HOLLOW',  // name given to cubes made in Hollow mode
+			cutout_inflate: 0.025,  // how much cut-out and hollow cubes are inflated
+			x_toggles: true         // X switches between Add and Cut out while the tool is held
 		};
 		const STORAGE_KEY = 'block_grid_modeler_settings';
 		const SIZES = [4, 8, 16, 32, 64];
-		const ADD_COLOR = '#3ddc84';
-		const CUTOUT_COLOR = '#d7263d';
+		const MODES = {
+			add: { name: 'Add', icon: 'add_box', color: '#3ddc84', inside: false, undo: 'Add block cube' },
+			cutout: { name: 'Cut out', icon: 'indeterminate_check_box', color: '#d7263d', inside: true, undo: 'Add cut-out cube' },
+			hollow: { name: 'Hollow', icon: 'check_box_outline_blank', color: '#4aa8ff', inside: true, undo: 'Add hollow cube' }
+		};
+		const TOOL_COLOR = '#d7263d';
 
 		/* ---------- core (pure, testable) ---------- */
 
@@ -2716,12 +2722,12 @@
 		/**
 		 * The grid cell to fill for a click at model point `point` on a face
 		 * facing `normal`: the cell just outside the face for 'add', just inside
-		 * it for 'cutout'. Cells are `size` units wide, on the block grid.
-		 * Returns { from, to }.
+		 * it for 'cutout' and 'hollow'. Cells are `size` units wide, on the block
+		 * grid. Returns { from, to }.
 		 */
 		function targetCell(point, normal, size, mode, centred) {
 			const off = gridOffset(centred);
-			const side = mode === 'cutout' ? -1 : 1;
+			const side = mode === 'cutout' || mode === 'hollow' ? -1 : 1;
 			const from = [0, 0, 0], to = [0, 0, 0];
 			for (let a = 0; a < 3; a++) {
 				// step half a cell off the face, so the point lands inside the wanted cell
@@ -2732,8 +2738,13 @@
 			return { from, to };
 		}
 
+		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
+		function toggledMode(mode) {
+			return mode === 'add' ? 'cutout' : 'add';
+		}
+
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -2743,13 +2754,20 @@
 		try {
 			const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
 			for (const key in DEFAULTS) if (key in stored) settings[key] = stored[key];
+			if (!MODES[settings.mode]) settings.mode = 'add';
 		} catch (e) {}
 		function saveSettings() {
 			try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) {}
 		}
 
-		let tool, modeSelect, sizeSelect, toolbar, settingsAction, styleNode;
-		let preview = null, previewMaterials = null;
+		let tool, modeSelect, sizeSelect, toolbar, settingsAction, styleNode, panel;
+		let preview = null, previewMaterials = {};
+		const listeners = [];
+
+		function nameFor(mode) {
+			const key = mode + '_name';
+			return String(settings[key] || DEFAULTS[key]).toUpperCase();
+		}
 
 		/** The model point and face direction under the cursor, or null if not over a cube. */
 		function hitOnCube(data) {
@@ -2768,7 +2786,30 @@
 			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred);
 		}
 
+		/** Switches mode and keeps the tool bar, panel and preview in step. */
+		function setMode(mode) {
+			if (!MODES[mode]) return;
+			settings.mode = mode;
+			saveSettings();
+			if (modeSelect && modeSelect.value !== mode) modeSelect.set(mode);
+			clearPreview();
+			if (lastHover) showPreview(lastHover);
+			syncPanel();
+		}
+
+		function setSize(size) {
+			const v = Math.max(1, Math.min(256, Math.round(Number(size)) || 16));
+			settings.size = v;
+			saveSettings();
+			if (sizeSelect && SIZES.includes(v)) sizeSelect.set(String(v));
+			clearPreview();
+			if (lastHover) showPreview(lastHover);
+			syncPanel();
+		}
+
 		/* --- hover preview --- */
+
+		let lastHover = null;
 
 		function clearPreview() {
 			if (!preview) return;
@@ -2780,18 +2821,17 @@
 		/** Shows a wire box where the next cube would go, in the space of the cube being pointed at. */
 		function showPreview(hit) {
 			clearPreview();
+			lastHover = hit;
 			if (!hit) return;
 			const cell = cellFor(hit);
-			if (!previewMaterials) {
-				previewMaterials = {
-					add: new THREE.LineBasicMaterial({ color: ADD_COLOR, depthTest: false, transparent: true }),
-					cutout: new THREE.LineBasicMaterial({ color: CUTOUT_COLOR, depthTest: false, transparent: true })
-				};
+			const mode = MODES[settings.mode];
+			if (!previewMaterials[settings.mode]) {
+				previewMaterials[settings.mode] = new THREE.LineBasicMaterial({ color: mode.color, depthTest: false, transparent: true });
 			}
-			const grow = settings.mode === 'cutout' ? Number(settings.cutout_inflate) || 0 : 0;
+			const grow = mode.inside ? Number(settings.cutout_inflate) || 0 : 0;
 			const size = [0, 1, 2].map(a => cell.to[a] - cell.from[a] + grow * 2);
 			const box = new THREE.BoxGeometry(size[0], size[1], size[2]);
-			preview = new THREE.LineSegments(new THREE.EdgesGeometry(box), previewMaterials[settings.mode === 'cutout' ? 'cutout' : 'add']);
+			preview = new THREE.LineSegments(new THREE.EdgesGeometry(box), previewMaterials[settings.mode]);
 			box.dispose();
 			preview.name = 'block_grid_modeler_preview';
 			preview.renderOrder = 10;
@@ -2814,8 +2854,8 @@
 
 		function placeCube(hit) {
 			const cell = cellFor(hit);
-			const cutout = settings.mode === 'cutout';
-			const name = String((cutout ? settings.cutout_name : settings.add_name) || (cutout ? 'CUTOUT' : 'ADD')).toUpperCase();
+			const mode = MODES[settings.mode];
+			const name = nameFor(settings.mode);
 			if (sameCubeExists(name, cell.from, cell.to)) {
 				Blockbench.showQuickMessage(`${name} cube is already there`);
 				return;
@@ -2830,7 +2870,7 @@
 				to: cell.to.slice(),
 				// keep the pivot of the cube it was placed against, so it moves with the same bone
 				origin: source.origin.slice(),
-				inflate: cutout ? Number(settings.cutout_inflate) || 0 : 0,
+				inflate: mode.inside ? Number(settings.cutout_inflate) || 0 : 0,
 				box_uv: source.box_uv,
 				autouv: source.autouv
 			}).init();
@@ -2848,11 +2888,140 @@
 			unselectAllElements();
 			cube.select();
 			Canvas.updateView({ elements: [cube], element_aspects: { transform: true, geometry: true, faces: true }, selection: true });
-			Undo.finishEdit(cutout ? 'Add cut-out cube' : 'Add block cube', { outliner: true, elements: [cube], selection: true });
+			Undo.finishEdit(mode.undo, { outliner: true, elements: [cube], selection: true });
 			Blockbench.dispatchEvent('add_cube', { object: cube });
+			syncPanel();
 		}
 
-		/* --- settings --- */
+		/* --- X key --- */
+
+		function isTyping(event) {
+			const t = event.target;
+			return t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName));
+		}
+
+		/**
+		 * X switches between Add and Cut out while the tool is in hand. Caught
+		 * before Blockbench sees it, where X would otherwise pick the Vertex Snap
+		 * tool; with any other tool, X does what it always does.
+		 */
+		function onKeyDown(event) {
+			if (!settings.x_toggles || !tool || Toolbox.selected !== tool) return;
+			if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || isTyping(event)) return;
+			if (event.key !== 'x' && event.key !== 'X') return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			setMode(toggledMode(settings.mode));
+			Blockbench.showQuickMessage(MODES[settings.mode].name, 700);
+		}
+
+		/* --- panel --- */
+
+		function countByName() {
+			const counts = {};
+			for (const mode in MODES) counts[mode] = Cube.all.filter(c => c.name === nameFor(mode)).length;
+			return counts;
+		}
+
+		function syncPanel() {
+			if (!panel || !panel.vue) return;
+			const vue = panel.vue;
+			vue.mode = settings.mode;
+			vue.size = Number(settings.size) || 16;
+			vue.names = { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name };
+			vue.inflate = settings.cutout_inflate;
+			vue.x_toggles = settings.x_toggles;
+			try { vue.counts = countByName(); } catch (e) {}
+		}
+
+		function createPanel() {
+			panel = new Panel('block_grid_cube_panel', {
+				name: 'Block Grid Cube',
+				icon: 'view_in_ar',
+				growable: true,
+				resizable: true,
+				default_side: 'right',
+				condition: () => Modes.edit && tool && Toolbox.selected === tool,
+				default_position: {
+					slot: 'right_bar',
+					float_position: [0, 0],
+					float_size: [300, 360],
+					height: 360
+				},
+				component: {
+					data() {
+						return {
+							modes: Object.keys(MODES).map(key => ({ key, name: MODES[key].name, icon: MODES[key].icon, color: MODES[key].color })),
+							sizes: SIZES,
+							mode: settings.mode,
+							size: Number(settings.size) || 16,
+							names: { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name },
+							inflate: settings.cutout_inflate,
+							x_toggles: settings.x_toggles,
+							counts: { add: 0, cutout: 0, hollow: 0 }
+						};
+					},
+					computed: {
+						custom_size() { return !this.sizes.includes(this.size); }
+					},
+					methods: {
+						setMode(mode) { setMode(mode); },
+						setSize(size) { setSize(size); },
+						setName(mode, value) {
+							settings[mode + '_name'] = String(value || DEFAULTS[mode + '_name']).toUpperCase().trim() || DEFAULTS[mode + '_name'];
+							saveSettings();
+							syncPanel();
+						},
+						setInflate(value) {
+							settings.cutout_inflate = Math.max(0, Math.min(1, Number(value) || 0));
+							saveSettings();
+							syncPanel();
+						},
+						setToggle(value) {
+							settings.x_toggles = !!value;
+							saveSettings();
+							syncPanel();
+						}
+					},
+					template: `
+						<div class="bgc_panel">
+							<label>Mode</label>
+							<div class="bgc_buttons">
+								<div v-for="m in modes" :key="m.key" class="bgc_button" :class="{selected: mode === m.key}" @click="setMode(m.key)" :title="m.name">
+									<i class="material-icons" :style="{color: m.color}">{{ m.icon }}</i><span>{{ m.name }}</span>
+								</div>
+							</div>
+							<p class="bgc_hint" v-if="x_toggles">Press X to switch between Add and Cut out.</p>
+
+							<label>Cube size <span class="bgc_subtle">in model units, 16 is one block</span></label>
+							<div class="bgc_buttons">
+								<div v-for="s in sizes" :key="s" class="bgc_button bgc_size" :class="{selected: size === s}" @click="setSize(s)">{{ s }}</div>
+								<input type="number" class="bgc_custom" :class="{selected: custom_size}" min="1" max="256" :value="size" @change="setSize($event.target.value)" title="Any other size">
+							</div>
+
+							<label>Names <span class="bgc_subtle">for your build script, always in capitals</span></label>
+							<div class="bgc_row" v-for="m in modes" :key="'n' + m.key">
+								<i class="material-icons" :style="{color: m.color}">{{ m.icon }}</i>
+								<input type="text" :value="names[m.key]" @change="setName(m.key, $event.target.value)">
+								<span class="bgc_subtle" :title="'Cubes named ' + names[m.key] + ' in this model'">{{ counts[m.key] }}</span>
+							</div>
+
+							<div class="bgc_row">
+								<span>Inflate</span>
+								<input type="number" min="0" max="1" step="0.005" :value="inflate" @change="setInflate($event.target.value)" title="How much Cut out and Hollow cubes are inflated">
+								<span class="bgc_subtle">cut out, hollow</span>
+							</div>
+							<div class="bgc_row">
+								<input type="checkbox" :checked="x_toggles" @change="setToggle($event.target.checked)">
+								<span>X switches Add and Cut out</span>
+							</div>
+						</div>
+					`
+				}
+			});
+		}
+
+		/* --- settings dialog (also under Tools) --- */
 
 		function openSettings() {
 			new Dialog({
@@ -2862,14 +3031,19 @@
 				form: {
 					add_name: { label: 'Name for added cubes', type: 'text', value: settings.add_name },
 					cutout_name: { label: 'Name for cut-out cubes', type: 'text', value: settings.cutout_name },
-					cutout_inflate: { label: 'Cut-out inflate', type: 'number', value: settings.cutout_inflate, step: 0.005, min: 0, max: 1 },
+					hollow_name: { label: 'Name for hollow cubes', type: 'text', value: settings.hollow_name },
+					cutout_inflate: { label: 'Inflate (cut out, hollow)', type: 'number', value: settings.cutout_inflate, step: 0.005, min: 0, max: 1 },
+					x_toggles: { label: 'X switches Add and Cut out', type: 'checkbox', value: settings.x_toggles },
 					_info: { type: 'info', text: 'Names are always written in capitals. Change them to whatever your build script looks for.' }
 				},
 				onConfirm(result) {
-					settings.add_name = String(result.add_name || DEFAULTS.add_name).toUpperCase();
-					settings.cutout_name = String(result.cutout_name || DEFAULTS.cutout_name).toUpperCase();
+					for (const mode in MODES) {
+						settings[mode + '_name'] = String(result[mode + '_name'] || DEFAULTS[mode + '_name']).toUpperCase();
+					}
 					settings.cutout_inflate = Math.max(0, Number(result.cutout_inflate) || 0);
+					settings.x_toggles = !!result.x_toggles;
 					saveSettings();
+					syncPanel();
 				}
 			}).show();
 		}
@@ -2878,31 +3052,36 @@
 			onload() {
 				styleNode = Blockbench.addCSS(`
 					[toolbar_item="block_grid_cube"] .icon, [menu_item="block_grid_cube"] > .icon,
-					[menu_item="block_grid_modeler_settings"] > .icon { color: ${CUTOUT_COLOR} !important; }
+					[menu_item="block_grid_modeler_settings"] > .icon,
+					.panel_handle[panel_id="block_grid_cube_panel"] .icon { color: ${TOOL_COLOR} !important; }
+					.bgc_panel { padding: 4px 8px 8px; }
+					.bgc_panel > label { display: block; margin: 8px 0 4px; color: var(--color-subtle_text); }
+					.bgc_subtle { color: var(--color-subtle_text); font-size: 0.85em; }
+					.bgc_buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+					.bgc_button { display: flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px;
+						background-color: var(--color-button); cursor: pointer; }
+					.bgc_button:hover { background-color: var(--color-selected); }
+					.bgc_button.selected { background-color: var(--color-accent); color: var(--color-accent_text); }
+					.bgc_size { min-width: 28px; justify-content: center; }
+					.bgc_custom { width: 64px; }
+					.bgc_custom.selected { outline: 2px solid var(--color-accent); }
+					.bgc_row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+					.bgc_row input[type=text] { flex: 1; min-width: 0; }
+					.bgc_row input[type=number] { width: 80px; }
+					.bgc_hint { color: var(--color-subtle_text); font-size: 0.85em; margin: 4px 0 0; }
 				`);
 
 				modeSelect = new BarSelect('block_grid_cube_mode', {
 					name: 'Mode',
 					value: settings.mode,
-					options: {
-						add: { name: 'Add', icon: 'add_box' },
-						cutout: { name: 'Cut out', icon: 'indeterminate_check_box' }
-					},
-					onChange() {
-						settings.mode = this.value;
-						saveSettings();
-						clearPreview();
-					}
+					options: Object.fromEntries(Object.keys(MODES).map(key => [key, { name: MODES[key].name, icon: MODES[key].icon }])),
+					onChange() { setMode(this.value); }
 				});
 				sizeSelect = new BarSelect('block_grid_cube_size', {
 					name: 'Cube size',
-					value: String(settings.size),
+					value: String(SIZES.includes(Number(settings.size)) ? settings.size : 16),
 					options: Object.fromEntries(SIZES.map(s => [String(s), s === 16 ? '16 (1 block)' : `${s}`])),
-					onChange() {
-						settings.size = Number(this.value) || 16;
-						saveSettings();
-						clearPreview();
-					}
+					onChange() { setSize(this.value); }
 				});
 				toolbar = new Toolbar('block_grid_cube', {
 					children: ['block_grid_cube_mode', 'block_grid_cube_size']
@@ -2910,7 +3089,7 @@
 
 				tool = new Tool('block_grid_cube', {
 					name: 'Block Grid Cube',
-					description: 'Click a face to add a cube on the block grid, or to cut one out',
+					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out',
 					icon: 'view_in_ar',
 					category: 'tools',
 					toolbar: 'block_grid_cube',
@@ -2928,15 +3107,25 @@
 						if (hit) placeCube(hit);
 					},
 					onSelect() {
-						// the bar keeps the last choice even if the tool was set elsewhere
 						modeSelect.set(settings.mode);
-						sizeSelect.set(String(settings.size));
+						if (SIZES.includes(Number(settings.size))) sizeSelect.set(String(settings.size));
+						syncPanel();
+						if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
 					},
 					onUnselect() {
 						clearPreview();
+						lastHover = null;
+						// the panel goes away with the tool, once the switch has happened
+						setTimeout(() => { if (typeof updateInterfacePanels === 'function') updateInterfacePanels(); }, 0);
 					}
 				});
 				try { Toolbox.add(tool); } catch (e) {}
+
+				createPanel();
+				window.addEventListener('keydown', onKeyDown, true);
+				for (const event of ['finished_edit', 'undo', 'redo', 'select_project']) {
+					listeners.push(Blockbench.on(event, syncPanel));
+				}
 
 				settingsAction = new Action('block_grid_modeler_settings', {
 					name: 'Block Grid Cube Settings',
@@ -2946,8 +3135,12 @@
 				MenuBar.addAction(settingsAction, 'tools');
 			},
 			onunload() {
+				window.removeEventListener('keydown', onKeyDown, true);
+				listeners.forEach(l => l && l.delete && l.delete());
+				listeners.length = 0;
 				clearPreview();
-				if (previewMaterials) { previewMaterials.add.dispose(); previewMaterials.cutout.dispose(); }
+				for (const key in previewMaterials) previewMaterials[key].dispose();
+				if (panel) panel.delete();
 				if (tool) tool.delete();
 				if (toolbar && toolbar.node) toolbar.node.remove();
 				if (typeof Toolbars !== 'undefined') delete Toolbars.block_grid_cube;
@@ -2966,7 +3159,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.1.0',
+		version: '1.2.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

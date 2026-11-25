@@ -204,27 +204,31 @@ Cells line up with the model on faces with their UV turned by 0 or 180 degrees. 
 
 ## Block Grid Cube tool
 
-Pick the `Block Grid Cube` tool in the Edit tab and move the mouse over the model. A wire box shows where the next cube will go: green in Add mode, red in Cut out mode. Click to place it. Each click is one undo step.
+Pick the `Block Grid Cube` tool in the Edit tab and move the mouse over the model. A wire box shows where the next cube will go, in the colour of the mode: green for Add, red for Cut out, blue for Hollow. Click to place it. Each click is one undo step.
+
+While the tool is in hand, its panel shows on the right with everything you need while placing:
+
+- `Mode`: Add, Cut out or Hollow. Press X to switch between Add and Cut out; Hollow is picked by hand. X only does this while the tool is in hand, and does its usual job (the Vertex Snap tool) otherwise. The switch at the bottom of the panel turns it off.
+- `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them.
+- `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
+- `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
+
+The mode and the standard sizes are also in the tool bar at the top, and the names and inflate under `Tools -> Block Grid Cube Settings`.
 
 ### Modes
 
-- `Add`: the new cube goes just outside the face you point at, as if you were stacking a block onto it.
-- `Cut out`: the new cube goes just inside the face you point at, filling the cell behind it, and is inflated by 0.025 so it sits slightly proud of the cubes it cuts into. It marks a part to remove; the cut itself is left to your build script.
+- `Add`: the new cube goes just outside the face you point at, as if you were stacking a block onto it. Named `ADD`.
+- `Cut out`: the new cube goes just inside the face you point at, filling the cell behind it, inflated so it sits slightly proud of the cubes it cuts into. Named `CUTOUT`.
+- `Hollow`: placed like Cut out, just inside the face and inflated, but named `HOLLOW`, for a build script that hollows that part out rather than removing it.
+
+The cut and the hollowing themselves are left to your build script.
 
 ### Cube size
 
-`Cube size` sets how big the new cube is, in model units: 4, 8, 16 (one block), 32 or 64. Cubes snap to a grid of that size laid over the model's block grid, so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
+Cubes snap to a grid of the chosen size laid over the model's block grid, so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
 
 ### The new cubes
 
-- They are named in capitals after what they do: `ADD` for added cubes and `CUTOUT` for cut-out cubes.
 - They go into the same bone as the cube you clicked, with the same pivot, so they move with it.
 - Every face gets the texture of the face you clicked, and the UV is laid out automatically, ready for a script to remap it.
 - Clicking a spot that already has a cube of the same name and size does nothing.
-
-### Settings
-
-Open `Tools -> Block Grid Cube Settings` to change:
-
-- `Name for added cubes` and `Name for cut-out cubes`: what your build script looks for. Names are always written in capitals.
-- `Cut-out inflate`: how much cut-out cubes are inflated, 0.025 by default.
