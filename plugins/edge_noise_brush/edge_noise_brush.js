@@ -754,11 +754,11 @@
 		noise: { scale: 1, shuffle: true }
 	};
 
-	// Every icon the plugin adds gets a thin outline in this colour.
-	const OUTLINE_COLOR = '#d7263d';
+	// Every icon the plugin adds is drawn in this colour.
+	const ICON_COLOR = '#d7263d';
 
-	/** An icon node carrying the outline. */
-	function outlinedIcon(name) {
+	/** An icon node in the plugin's colour. */
+	function coloredIcon(name) {
 		const node = Blockbench.getIconNode(name);
 		node.classList.add('edge_noise_icon');
 		return node;
@@ -1279,7 +1279,7 @@
 		clearCache();
 		const brush = BarItems.brush_tool;
 		if (brush && brush.setIcon) brush.setIcon(activeMode ? MODES[activeMode].icon : original.icon);
-		// outlines the Brush tool's icon wherever it shows while one of these modes is on
+		// colours the Brush tool's icon wherever it shows while one of these modes is on
 		document.body.classList.toggle('edge_noise_brush_active', !!activeMode);
 		// first use of a preset brush: ask for the preset folder
 		if (activeMode && KINDS[activeMode] && isApp && !presetFs) reloadPresets(true);
@@ -1664,8 +1664,7 @@
 		body.edge_noise_brush_active [toolbar_item="brush_tool"] .icon:not(.action_more_options),
 		[menu_item="edge_noise_brush_settings"] > .icon,
 		.panel_handle[panel_id="edge_noise_brush"] .icon {
-			filter: drop-shadow(1px 0 0 ${OUTLINE_COLOR}) drop-shadow(-1px 0 0 ${OUTLINE_COLOR})
-				drop-shadow(0 1px 0 ${OUTLINE_COLOR}) drop-shadow(0 -1px 0 ${OUTLINE_COLOR});
+			color: ${ICON_COLOR} !important;
 		}
 		.edge_noise_panel { padding: 4px 8px 8px; }
 		.edge_noise_bar { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 4px; }
@@ -1737,7 +1736,7 @@
 				const entries = Object.keys(MODES).map(mode => ({
 					id: 'edge_noise_brush_' + mode,
 					name: MODES[mode].name,
-					icon: () => outlinedIcon(MODES[mode].icon),
+					icon: () => coloredIcon(MODES[mode].icon),
 					click() {
 						tool.select();
 						setMode(mode);
@@ -1770,7 +1769,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.9.0',
+		version: '0.9.1',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
