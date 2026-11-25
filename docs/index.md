@@ -37,7 +37,7 @@ This plugin renders the model you have open into finished images and GIFs: still
 [Learn More](./render_model/about.md)
 
 ### Edge Noise Brush
-This plugin adds a mode to the Brush tool that breaks up straight edges between two tones into pixel steps, using only the colours already on either side. The steps are random or follow your own presets, PNGs showing the edge you want, and a panel previews the result on the selected texture.
+This plugin adds two modes to the Brush tool. The Edge Noise Brush breaks up straight edges between two tones into pixel steps, using only the colours already on either side, randomly or following presets made from areas of your own textures. The Noise Brush scatters the brush colour over a surface, densest in the middle of the brush. Going back over a spot in one stroke grows either effect further.
 
 [Learn More](./edge_noise_brush/about.md)
 

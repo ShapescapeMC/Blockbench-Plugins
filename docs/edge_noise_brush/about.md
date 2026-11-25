@@ -10,4 +10,6 @@ The steps come from one of two places:
 
 By default only the colour selected in the colour panel grows, stepping outward into whatever it borders, and never gets eaten into. With that option off, both tones push into each other.
 
-The result is worked out once from a snapshot of the texture when the stroke starts, so painting over the same spot again in one stroke changes nothing further.
+Sliding the brush along an edge breaks it up once. Going back over it without letting go grows the brush colour another step each time, so you can push an edge further by scrubbing.
+
+The plugin also adds a Noise Brush, which scatters the brush colour over any surface, densest in the middle of the brush and thinning out towards its edge. Scrubbing over a spot fills it in further. It is meant for starting texture on a flat area with a big brush.

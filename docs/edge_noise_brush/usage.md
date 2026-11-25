@@ -6,6 +6,8 @@ Hold Alt to pick a colour from the texture, as with the normal brush. With `Grow
 
 Painting away from any edge does nothing, since there is nothing to break up.
 
+Going back over a spot without letting go grows the brush colour another step each time, so scrubbing back and forth over an edge pushes it further. Each return also varies the steps, so the edge keeps breaking up rather than just getting thicker. A new stroke starts from what is on the texture again. `Max extra growth per stroke` in the settings caps how far one stroke can go, and `Grow on repeated passes` turns it off.
+
 The direction you paint in picks which edges change: paint up or down along a vertical edge and only vertical edges break up, paint sideways along a horizontal edge and only horizontal edges do. That keeps a stroke along one edge from also roughening a corner it passes. Turn `Follow stroke direction` off in the settings to always break up both.
 
 To go back to the normal brush, pick any other entry from the Brush tool's dropdown, such as `Pixel Brush`.
@@ -18,11 +20,15 @@ While the Edge Noise Brush is active, its panel shows on the right in the Paint 
 - Below the list is the selected preset at full size, or a sample edge for random steps.
 - At the bottom is the selected texture as it would look if you painted over all of it with the current preset, settings and colour. Use it to judge a preset before painting.
 
-The buttons along the top add presets from PNG files, save the selected texture as a preset, open the preset folder, reload the presets, and open the brush settings. Hover over a preset to delete it.
+The buttons along the top add presets from PNG files, save a preset from the texture, open the preset folder, reload the presets, and open the brush settings. Hover over a preset to delete it.
 
 ## Presets
 
-A preset is a PNG with a bright side and a dark side that meet at the jagged edge you want. Draw it the way the finished edge should look:
+A preset is a PNG with a bright side and a dark side that meet at the jagged edge you want.
+
+The quickest way to make one is from a texture you already have. Use the selection tool in the UV editor to draw a box around an edge you like, then click the selection button in the panel. Only the selected area is saved. With nothing selected, the whole texture is saved.
+
+You can also draw one from scratch, the way the finished edge should look:
 
 ```
 ################
@@ -46,6 +52,8 @@ Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench
 Open `Tools -> Edge Noise Brush Settings`, or the settings button in the panel. Changes apply from the next stroke and are remembered between sessions.
 
 - `Grow brush colour only`: on by default. Only pixels matching the brush colour spread into the tone they border. Turn it off and both sides of every edge push into each other.
+- `Grow on repeated passes`: on by default. Going back over a spot in the same stroke grows it another step.
+- `Max extra growth per stroke`: how many extra steps one stroke can add by going back over a spot.
 - `Colour tolerance`: how close a pixel has to be to the brush colour, per RGB channel out of 255, to count as that colour.
 - `Roughness %`, `Max step depth (px)`, `Max segment length (px)`: shape the random steps. They are ignored when a preset is selected.
 - `Horizontal edges` / `Vertical edges`: which edge directions to break up.
@@ -56,3 +64,16 @@ Open `Tools -> Edge Noise Brush Settings`, or the settings button in the panel. 
 ```{note}
 Two colours with almost the same brightness may not be seen as an edge. Lower `Edge threshold` if a boundary is being ignored.
 ```
+
+## Noise Brush
+
+The Noise Brush is a second mode in the Brush tool's dropdown, for surfaces rather than edges. It scatters the brush colour as single pixels or small clumps, densest in the middle of the brush and thinning out towards its edge. Use a big brush to start texture on a flat area, then scrub back and forth over the spots you want fuller. Each time the brush comes back over a spot without letting go, more of it fills in. A new stroke starts afresh.
+
+It only ever places the brush colour, at the brush opacity. Hold Alt to pick the colour. While it is active, the Brush icon turns into a dotted circle and the panel on the right shows its settings:
+
+- `Density`: how full the middle of the brush gets on the first pass.
+- `Falloff`: how much thinner the noise gets towards the edge of the brush. At 0 it is even across the whole brush.
+- `Grain`: the size of the clumps in pixels. 1 gives single pixels.
+- `Seed`: changes the pattern.
+
+The panel shows what one pass and three passes over the same spot look like in the current brush colour. Brush softness also thins out the edge of the brush, on top of `Falloff`.
