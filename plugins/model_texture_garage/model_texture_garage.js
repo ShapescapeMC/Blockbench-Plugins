@@ -2775,13 +2775,23 @@
 		 * The grid cell to fill for a click at model point `point` on a face
 		 * facing `normal`: the cell just outside the face for 'add', just inside
 		 * it for 'cutout' and 'hollow'. Cells are `size` units wide, on the block
-		 * grid. Returns { from, to }.
+		 * grid. For 'cutout' and 'hollow', when `facePlane` (where the clicked
+		 * face sits on its axis) is given, the cell starts at that face and
+		 * reaches `size` inwards, so its outer side is flush with the surface
+		 * clicked even where that is not on a block edge; along the surface it
+		 * stays on the grid. Returns { from, to }.
 		 */
-		function targetCell(point, normal, size, mode, centred) {
+		function targetCell(point, normal, size, mode, centred, facePlane) {
 			const off = gridOffset(centred);
-			const side = mode === 'cutout' || mode === 'hollow' ? -1 : 1;
+			const inside = mode === 'cutout' || mode === 'hollow';
+			const side = inside ? -1 : 1;
 			const from = [0, 0, 0], to = [0, 0, 0];
 			for (let a = 0; a < 3; a++) {
+				if (inside && normal[a] !== 0 && typeof facePlane === 'number') {
+					from[a] = normal[a] > 0 ? facePlane - size : facePlane;
+					to[a] = from[a] + size;
+					continue;
+				}
 				// step half a cell off the face, so the point lands inside the wanted cell
 				const q = point[a] + normal[a] * side * size / 2;
 				from[a] = Math.floor((q - off[a]) / size + 1e-9) * size + off[a];
@@ -2851,7 +2861,10 @@
 
 		function cellFor(hit) {
 			const centred = typeof Format !== 'undefined' && !!Format.centered_grid;
-			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred);
+			// where the clicked face sits on its own axis: the top of the cube for 'up', and so on
+			const a = hit.normal.findIndex(v => v !== 0);
+			const facePlane = hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a];
+			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred, facePlane);
 		}
 
 		/** Switches mode and keeps the tool bar, panel and preview in step. */
@@ -3314,7 +3327,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.4.0',
+		version: '1.5.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

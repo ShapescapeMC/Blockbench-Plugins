@@ -221,8 +221,8 @@ The mode and the standard sizes are also in the tool bar at the top, and the nam
 ### Modes
 
 - `Add`: the new cube goes just outside the face you point at, as if you were stacking a block onto it. Named `ADD`.
-- `Cut out`: the new cube goes just inside the face you point at, filling the cell behind it, inflated so it sits slightly proud of the cubes it cuts into. Named `CUTOUT`.
-- `Hollow`: placed like Cut out, just inside the face and inflated, but named `HOLLOW`, for a build script that hollows that part out rather than removing it.
+- `Cut out`: the new cube goes just inside the face you point at: its outer side is flush with that face, even where the face is not on a block edge, and it reaches the cube size inwards. Along the face it stays on the block grid. It is inflated so it sits slightly proud of the surface, where you can see it. Named `CUTOUT`.
+- `Hollow`: placed like Cut out, flush with the face you point at and inflated, but named `HOLLOW`, for a build script that hollows that part out rather than removing it.
 
 The cut and the hollowing themselves are left to your build script.
 
