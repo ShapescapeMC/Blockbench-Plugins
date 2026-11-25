@@ -37,7 +37,10 @@
 		noise_density: 35,   // % of pixels filled in the middle of the brush on the first pass
 		noise_falloff: 70,   // % the density drops from the middle to the edge of the brush
 		noise_grain: 1,      // size of the noise clumps in px
-		noise_seed: 1
+		noise_seed: 1,
+		highlight_preset: '', // line preset names, '' = plain solid line
+		shadow_preset: '',
+		preset_options: {}    // 'kind/name' -> options for that preset
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -283,23 +286,34 @@
 		};
 	}
 
+	function scaleOf(v) {
+		return Math.max(1, Math.min(8, Math.round(Number(v) || 1)));
+	}
+
+	/** Column of a preset at position u along an edge, with the pattern stretched by `length`. */
+	function presetColumn(u, phase, period, length) {
+		const full = period * length;
+		return Math.floor((((u + phase) % full) + full) % full / length);
+	}
+
 	/**
 	 * Applies a learned preset to edges perpendicular to axis (dx, dy).
 	 * target: [r, g, b] to grow that colour only, or null for both tones.
+	 * opt: { depth, length } scales the pattern across and along the edge.
 	 */
-	function presetPass(s, dx, dy, P, target) {
+	function presetPass(s, dx, dy, P, target, opt) {
 		const thr = s.threshold;
-		const reach = P.height;
+		const depth = scaleOf(opt && opt.depth), length = scaleOf(opt && opt.length);
+		const reach = P.height * depth;
 		const phase = (s.seed | 0);
 
 		// Is the preset bright at column u, at row r relative to the edge?
 		// r < 0 is the bright side of the original edge, r >= 0 the dark side.
 		function brightAt(u, r, base) {
-			const y = base + r;
+			const y = base * depth + r;
 			if (y < 0) return true;
-			if (y >= P.height) return false;
-			const x = (((u + phase) % P.period) + P.period) % P.period;
-			return P.bits[y * P.period + x] === 1;
+			if (y >= reach) return false;
+			return P.bits[Math.floor(y / depth) * P.period + presetColumn(u, phase, P.period, length)] === 1;
 		}
 
 		return {
@@ -331,6 +345,120 @@
 						const r = pBright ? -k : k - 1;
 						if (brightAt(u, r, base) !== pBright) copyPixel(src, q, out, i);
 						break;
+					}
+				}
+			}
+		};
+	}
+
+	/**
+	 * Learns a line pattern from a preset image: a line drawn over a plain
+	 * background, running either way, with gaps and changes in thickness. The
+	 * line is the opaque pixels if there are transparent ones, otherwise the
+	 * less common of the two tones.
+	 *
+	 * Returns bits[row * period + x] = 1 where the line is, normalised to run
+	 * horizontally. Row 0 is the row nearest the edge.
+	 */
+	function parseLinePreset(data, w, h) {
+		const n = w * h;
+		let transparent = 0;
+		for (let i = 0; i < n; i++) if (data[i * 4 + 3] < 128) transparent++;
+		let line = new Uint8Array(n);
+		if (transparent > 0 && transparent < n) {
+			for (let i = 0; i < n; i++) line[i] = data[i * 4 + 3] >= 128 ? 1 : 0;
+		} else {
+			let lo = Infinity, hi = -Infinity;
+			for (let i = 0; i < n; i++) { const l = lumAt(data, i); lo = Math.min(lo, l); hi = Math.max(hi, l); }
+			if (!(hi - lo > 1)) throw 'The image needs a line drawn over a plain background.';
+			let split = (lo + hi) / 2;
+			for (let iter = 0; iter < 8; iter++) {
+				let sa = 0, ca = 0, sb = 0, cb = 0;
+				for (let i = 0; i < n; i++) { const l = lumAt(data, i); if (l > split) { sa += l; ca++; } else { sb += l; cb++; } }
+				if (!ca || !cb) break;
+				split = (sa / ca + sb / cb) / 2;
+			}
+			let brightCount = 0;
+			for (let i = 0; i < n; i++) if (lumAt(data, i) > split) brightCount++;
+			const lineIsBright = brightCount <= n - brightCount;
+			for (let i = 0; i < n; i++) line[i] = (lumAt(data, i) > split) === lineIsBright ? 1 : 0;
+		}
+
+		let minX = w, maxX = -1, minY = h, maxY = -1;
+		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+			if (!line[y * w + x]) continue;
+			minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+		}
+		if (maxX < 0) throw 'The image needs a line drawn over a plain background.';
+		let W = w, top = minY, bottom = maxY;
+		// a line taller than it is wide runs up and down: turn it on its side
+		if (maxY - minY > maxX - minX) {
+			const t = new Uint8Array(n);
+			for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) t[x * h + y] = line[y * w + x];
+			line = t; W = h; top = minX; bottom = maxX;
+		}
+		const rows = bottom - top + 1;
+		const bits = new Uint8Array(W * rows);
+		for (let y = 0; y < rows; y++) for (let x = 0; x < W; x++) bits[y * W + x] = line[(y + top) * W + x];
+		return { period: W, rows, bits };
+	}
+
+	/** A plain unbroken one pixel line, used when no line preset is selected. */
+	const SOLID_LINE = { period: 1, rows: 1, bits: new Uint8Array([1]) };
+
+	/**
+	 * Draws a line of `color` along the edges between two tones, following the
+	 * edge's outline, on the side opt.side ('bright' or 'dark') of it.
+	 * opt: { thickness, length, offset, side, flip }.
+	 * Works on horizontal and vertical edges in one go, reading only the input.
+	 */
+	function linePass(s, P, opt, color) {
+		const thr = s.threshold;
+		const thickness = scaleOf(opt.thickness), length = scaleOf(opt.length);
+		const offset = Math.max(0, Math.min(16, Math.round(Number(opt.offset) || 0)));
+		const onBright = opt.side === 'bright';
+		const span = P.rows * thickness;
+		const reach = offset + span;
+		const phase = (s.seed | 0);
+		const axes = [];
+		if (s.horizontal) axes.push([0, 1]);
+		if (s.vertical) axes.push([1, 0]);
+
+		function lineAt(u, r) {
+			if (r < 0 || r >= span) return false;
+			let row = Math.floor(r / thickness);
+			if (opt.flip) row = P.rows - 1 - row;
+			return P.bits[row * P.period + presetColumn(u, phase, P.period, length)] === 1;
+		}
+
+		return {
+			reach,
+			run(src, out, w, h, x0, y0, x1, y1) {
+				const [cr, cg, cb] = color;
+				for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+					const i = y * w + x;
+					if (src[i * 4 + 3] === 0) continue;
+					const li = lumAt(src, i);
+					let paint = false;
+					for (const [dx, dy] of axes) {
+						const u = dx === 0 ? x : y;
+						const kBack = scan(src, w, h, x, y, -dx, -dy, reach, thr);
+						const kFwd = scan(src, w, h, x, y, dx, dy, reach, thr);
+						const order = [];
+						if (kBack > 0) order.push([kBack, -1]);
+						if (kFwd > 0) order.push([kFwd, 1]);
+						if (order.length === 2 && kFwd < kBack) order.reverse();
+						for (const [k, side] of order) {
+							const q = (y + side * dy * k) * w + (x + side * dx * k);
+							// only edges where this pixel is on the chosen side
+							if ((li > lumAt(src, q)) !== onBright) continue;
+							paint = lineAt(u, k - 1 - offset);
+							break;
+						}
+						if (paint) break;
+					}
+					if (paint) {
+						out[i * 4] = cr; out[i * 4 + 1] = cg; out[i * 4 + 2] = cb; out[i * 4 + 3] = 255;
 					}
 				}
 			}
@@ -374,9 +502,9 @@
 	 * level 0 is the first application; higher levels vary the pattern so
 	 * repeated growth does not just repeat the same steps.
 	 */
-	function edgeLayer(input, s, target, preset, level) {
+	function edgeLayer(input, s, target, preset, level, presetOpt) {
 		const sl = level ? Object.assign({}, s, { seed: (s.seed | 0) + level * 1013 }) : s;
-		const make = (dx, dy, salt) => preset ? presetPass(sl, dx, dy, preset, target)
+		const make = (dx, dy, salt) => preset ? presetPass(sl, dx, dy, preset, target, presetOpt)
 			: target ? randomTargetPass(sl, dx, dy, salt, target)
 			: randomPass(sl, dx, dy, salt);
 		let layer = input;
@@ -391,9 +519,21 @@
 	 * preset: result of parsePreset, or null for random steps.
 	 * levels: how many times to apply it (1 = once).
 	 */
-	function processImage(src, w, h, s, target, preset, levels) {
+	function processImage(src, w, h, s, target, preset, levels, presetOpt) {
 		let layer = sourceLayer(new Uint8ClampedArray(src), w, h);
-		for (let l = 0; l < (levels || 1); l++) layer = edgeLayer(layer, s, target, preset, l);
+		for (let l = 0; l < (levels || 1); l++) layer = edgeLayer(layer, s, target, preset, l, presetOpt);
+		layer.ensure(0, 0, w - 1, h - 1);
+		return layer.data;
+	}
+
+	/** Lazy result of the highlight or shadow line brush on top of input. */
+	function lineLayer(input, s, P, opt, color) {
+		return passLayer(input, linePass(s, P || SOLID_LINE, opt, color), 1, 1);
+	}
+
+	/** Whole-image result of the line brush, for previews and tests. */
+	function processLines(src, w, h, s, P, opt, color) {
+		const layer = lineLayer(sourceLayer(new Uint8ClampedArray(src), w, h), s, P, opt, color);
 		layer.ensure(0, 0, w - 1, h - 1);
 		return layer.data;
 	}
@@ -433,16 +573,18 @@
 	}
 
 	if (typeof module !== 'undefined' && module.exports) {
-		module.exports = { processImage, parsePreset, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
+		module.exports = { processImage, processLines, parsePreset, parseLinePreset, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
 	}
 	if (typeof Plugin === 'undefined') return;
 
+
 	/* ---------- Blockbench integration ---------- */
 
-	let settings = Object.assign({}, DEFAULTS);
+	let settings = Object.assign({}, DEFAULTS, { preset_options: {} });
 	try {
 		const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
 		for (const key in DEFAULTS) if (key in stored) settings[key] = stored[key];
+		if (!settings.preset_options || typeof settings.preset_options !== 'object') settings.preset_options = {};
 	} catch (e) {}
 	function saveSettings() {
 		try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) {}
@@ -450,9 +592,23 @@
 
 	const MODES = {
 		edge: { name: 'Edge Noise Brush', icon: 'grain' },
-		noise: { name: 'Noise Brush', icon: 'blur_on' }
+		noise: { name: 'Noise Brush', icon: 'blur_on' },
+		highlight: { name: 'Highlight Brush', icon: 'light_mode' },
+		shadow: { name: 'Shadow Brush', icon: 'dark_mode' }
 	};
-	let activeMode = null;   // null = normal brush, 'edge' or 'noise'
+	// Brush modes that use presets, and where their presets live.
+	const KINDS = {
+		edge: { folder: '', setting: 'preset', builtin: 'Random steps', builtin_icon: 'shuffle', title: 'Edge Noise Preset' },
+		highlight: { folder: 'highlights', setting: 'highlight_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Highlight Preset' },
+		shadow: { folder: 'shadows', setting: 'shadow_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Shadow Preset' }
+	};
+	const OPTION_DEFAULTS = {
+		edge: { depth: 1, length: 1 },
+		highlight: { thickness: 1, length: 1, offset: 0, side: 'bright', flip: false },
+		shadow: { thickness: 1, length: 1, offset: 0, side: 'dark', flip: false }
+	};
+
+	let activeMode = null;   // null = normal brush, or a key of MODES
 	let cache = null;        // per-stroke state, rebuilt at stroke start
 	let settingsAction, panel;
 	let original = null;
@@ -464,30 +620,37 @@
 
 	/* --- presets --- */
 
-	// { name, url (data URL), parsed, error }
-	let presets = [];
-	let presetFs = null, presetDir = null, path = null;
+	// kind -> [{ name, url (data URL), parsed, error }]
+	const presets = { edge: [], highlight: [], shadow: [] };
+	let presetFs = null, presetRoot = null, path = null;
 
-	function presetFolder() {
-		if (presetDir) return presetDir;
-		if (typeof SystemInfo === 'undefined' || !SystemInfo.user_data_directory) return null;
-		path = path || requireNativeModule('path');
-		presetDir = path.join(SystemInfo.user_data_directory, PRESET_FOLDER);
-		return presetDir;
+	function presetFolder(kind) {
+		if (!presetRoot) {
+			if (typeof SystemInfo === 'undefined' || !SystemInfo.user_data_directory) return null;
+			path = path || requireNativeModule('path');
+			presetRoot = path.join(SystemInfo.user_data_directory, PRESET_FOLDER);
+		}
+		const sub = kind ? KINDS[kind].folder : '';
+		return sub ? path.join(presetRoot, sub) : presetRoot;
 	}
 
 	/** Scoped file system for the preset folder, asking for permission if needed. */
 	function getPresetFs(ask) {
 		if (presetFs) return presetFs;
 		if (!isApp || typeof requireNativeModule !== 'function') return null;
-		const dir = presetFolder();
-		if (!dir) return null;
+		const root = presetFolder(null);
+		if (!root) return null;
 		presetFs = requireNativeModule('fs', {
-			scope: dir,
+			scope: root,
 			message: 'Stores Edge Noise Brush presets in their own folder.',
 			show_permission_dialog: !!ask
 		}) || null;
-		if (presetFs && !presetFs.existsSync(dir)) presetFs.mkdirSync(dir, { recursive: true });
+		if (presetFs) {
+			for (const kind in KINDS) {
+				const dir = presetFolder(kind);
+				if (!presetFs.existsSync(dir)) presetFs.mkdirSync(dir, { recursive: true });
+			}
+		}
 		return presetFs;
 	}
 
@@ -506,44 +669,49 @@
 		});
 	}
 
-	async function makePreset(name, url) {
+	async function makePreset(kind, name, url) {
 		const preset = { name, url, parsed: null, error: '' };
 		try {
 			const img = await loadImageData(url);
-			preset.parsed = parsePreset(img.data, img.width, img.height);
+			preset.parsed = kind === 'edge' ? parsePreset(img.data, img.width, img.height) : parseLinePreset(img.data, img.width, img.height);
 		} catch (e) {
 			preset.error = String(e);
 		}
 		return preset;
 	}
 
-	function readWebPresets() {
+	const webKey = (kind) => kind === 'edge' ? WEB_PRESETS_KEY : WEB_PRESETS_KEY + '_' + kind;
+	function readWebPresets(kind) {
 		try {
-			const list = JSON.parse(localStorage.getItem(WEB_PRESETS_KEY) || '[]');
+			const list = JSON.parse(localStorage.getItem(webKey(kind)) || '[]');
 			return Array.isArray(list) ? list.filter(p => p && typeof p.name === 'string' && typeof p.data === 'string') : [];
 		} catch (e) { return []; }
 	}
 
 	async function reloadPresets(ask) {
-		const list = [];
 		const fs = getPresetFs(ask);
-		if (fs) {
-			let files = [];
-			try { files = fs.readdirSync(presetDir).filter(f => /\.png$/i.test(f)).sort(); } catch (e) {}
-			for (const file of files) {
-				const b64 = fs.readFileSync(path.join(presetDir, file), 'base64');
-				list.push(await makePreset(file.replace(/\.png$/i, ''), 'data:image/png;base64,' + b64));
+		for (const kind in KINDS) {
+			const list = [];
+			if (fs) {
+				const dir = presetFolder(kind);
+				let files = [];
+				try { files = fs.readdirSync(dir).filter(f => /\.png$/i.test(f)).sort(); } catch (e) {}
+				for (const file of files) {
+					const b64 = fs.readFileSync(path.join(dir, file), 'base64');
+					list.push(await makePreset(kind, file.replace(/\.png$/i, ''), 'data:image/png;base64,' + b64));
+				}
+			} else if (!isApp) {
+				for (const p of readWebPresets(kind)) list.push(await makePreset(kind, p.name, p.data));
 			}
-		} else if (!isApp) {
-			for (const p of readWebPresets()) list.push(await makePreset(p.name, p.data));
+			presets[kind] = list;
+			const key = KINDS[kind].setting;
+			if (settings[key] && !list.find(p => p.name === settings[key])) settings[key] = '';
 		}
-		presets = list;
-		if (settings.preset && !presets.find(p => p.name === settings.preset)) settings.preset = '';
 		clearCache();
 		refreshPanel();
 	}
 
-	function savePresetImage(name, dataUrl) {
+	function savePresetImage(kind, name, dataUrl) {
 		name = String(name).replace(/[\\/:*?"<>|]/g, '').trim();
 		if (!name) return null;
 		const fs = getPresetFs(true);
@@ -551,11 +719,11 @@
 			const b64 = dataUrl.split(',')[1];
 			const bin = atob(b64), bytes = new Uint8Array(bin.length);
 			for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-			fs.writeFileSync(path.join(presetDir, name + '.png'), bytes);
+			fs.writeFileSync(path.join(presetFolder(kind), name + '.png'), bytes);
 		} else if (!isApp) {
-			const list = readWebPresets().filter(p => p.name !== name);
+			const list = readWebPresets(kind).filter(p => p.name !== name);
 			list.push({ name, data: dataUrl });
-			try { localStorage.setItem(WEB_PRESETS_KEY, JSON.stringify(list)); } catch (e) {
+			try { localStorage.setItem(webKey(kind), JSON.stringify(list)); } catch (e) {
 				Blockbench.showMessageBox({ title: 'Edge Noise Brush', message: 'Not enough browser storage to save this preset.' });
 				return null;
 			}
@@ -565,31 +733,33 @@
 		return name;
 	}
 
-	function deletePreset(name) {
+	function deletePreset(kind, name) {
 		const fs = getPresetFs(true);
 		if (fs) {
-			try { fs.unlinkSync(path.join(presetDir, name + '.png')); } catch (e) {}
+			try { fs.unlinkSync(path.join(presetFolder(kind), name + '.png')); } catch (e) {}
 		} else if (!isApp) {
-			try { localStorage.setItem(WEB_PRESETS_KEY, JSON.stringify(readWebPresets().filter(p => p.name !== name))); } catch (e) {}
+			try { localStorage.setItem(webKey(kind), JSON.stringify(readWebPresets(kind).filter(p => p.name !== name))); } catch (e) {}
 		}
-		if (settings.preset === name) { settings.preset = ''; saveSettings(); }
+		delete settings.preset_options[kind + '/' + name];
+		if (settings[KINDS[kind].setting] === name) settings[KINDS[kind].setting] = '';
+		saveSettings();
 		reloadPresets(false);
 	}
 
-	function importPresets() {
+	function importPresets(kind) {
 		Blockbench.import({
 			resource_id: 'edge_noise_preset',
 			extensions: ['png'],
-			type: 'Edge Noise Preset',
+			type: KINDS[kind].title,
 			readtype: 'image',
 			multiple: true
 		}, async (files) => {
 			let last = null;
 			for (const file of files) {
-				last = savePresetImage(file.name.replace(/\.png$/i, ''), file.content) || last;
+				last = savePresetImage(kind, file.name.replace(/\.png$/i, ''), file.content) || last;
 			}
 			await reloadPresets(false);
-			if (last) selectPreset(last);
+			if (last) selectPreset(kind, last);
 		});
 	}
 
@@ -603,7 +773,7 @@
 	}
 
 	/** Saves the selected area of the texture as a preset, or the whole texture if nothing is selected. */
-	function saveTextureAsPreset() {
+	function saveTextureAsPreset(kind) {
 		const texture = currentTexture();
 		if (!texture || !texture.canvas) {
 			Blockbench.showQuickMessage('Select a texture first');
@@ -617,27 +787,56 @@
 			canvas.getContext('2d').drawImage(texture.canvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
 		}
 		const base = texture.name.replace(/\.png$/i, '') + (rect ? '_area' : '');
-		Blockbench.textPrompt(rect ? `Preset from selected area (${rect.w}×${rect.h})` : 'Preset from whole texture', base, async (name) => {
-			const saved = savePresetImage(name, canvas.toDataURL('image/png'));
+		const what = KINDS[kind].title.toLowerCase();
+		Blockbench.textPrompt(rect ? `New ${what} from selected area (${rect.w}×${rect.h})` : `New ${what} from whole texture`, base, async (name) => {
+			const saved = savePresetImage(kind, name, canvas.toDataURL('image/png'));
 			await reloadPresets(false);
-			if (saved) selectPreset(saved);
+			if (saved) selectPreset(kind, saved);
 		});
 	}
 
-	function openPresetFolder() {
-		const dir = presetFolder();
+	function openPresetFolder(kind) {
+		const dir = presetFolder(kind);
 		if (!dir || !getPresetFs(true)) return;
 		const shell = requireNativeModule('shell', { message: 'Opens the Edge Noise Brush preset folder.' });
 		if (shell) shell.openPath(dir);
 	}
 
-	function selectedPreset() {
-		const p = settings.preset && presets.find(p => p.name === settings.preset);
+	function selectedPresetName(kind) {
+		return settings[KINDS[kind].setting] || '';
+	}
+
+	function selectedPreset(kind) {
+		const name = selectedPresetName(kind);
+		const p = name && presets[kind].find(p => p.name === name);
 		return p && p.parsed ? p.parsed : null;
 	}
 
-	function selectPreset(name) {
-		settings.preset = name || '';
+	function selectPreset(kind, name) {
+		settings[KINDS[kind].setting] = name || '';
+		saveSettings();
+		clearCache();
+		refreshPanel();
+	}
+
+	/** Options for a preset ('' = the built-in one), filled in with defaults. */
+	function presetOptions(kind, name) {
+		const stored = settings.preset_options[kind + '/' + (name || '')] || {};
+		return Object.assign({}, OPTION_DEFAULTS[kind], stored);
+	}
+
+	function setPresetOption(kind, name, key, value) {
+		const id = kind + '/' + (name || '');
+		const opt = Object.assign({}, settings.preset_options[id] || {});
+		if (key === 'side') opt.side = value === 'bright' ? 'bright' : 'dark';
+		else if (key === 'flip') opt.flip = !!value;
+		else {
+			const max = key === 'offset' ? 16 : 8, min = key === 'offset' ? 0 : 1;
+			const v = Math.round(Number(value));
+			if (!isFinite(v)) return;
+			opt[key] = Math.max(min, Math.min(max, v));
+		}
+		settings.preset_options[id] = opt;
 		saveSettings();
 		clearCache();
 		refreshPanel();
@@ -677,7 +876,7 @@
 		return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 	}
 
-	/** Starts the per-stroke state for a texture. The edge brush also takes a snapshot of it. */
+	/** Starts the per-stroke state for a texture, with a snapshot of it where the mode needs one. */
 	function startCache(texture, color, mode) {
 		const canvas = getCanvas(texture);
 		const w = canvas.width, h = canvas.height;
@@ -688,16 +887,23 @@
 			lastDab: new Int32Array(w * h).fill(-1000),
 			passes: new Uint8Array(w * h)         // how many times the brush came back over each pixel
 		};
-		if (mode === 'edge') {
-			const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-			cache.target = settings.use_brush_color ? color : null;
-			cache.preset = selectedPreset();
-			cache.source = sourceLayer(data, w, h);   // getImageData already returns a fresh copy
-			cache.levels = { both: [cache.source], h: [cache.source], v: [cache.source] };
-		} else {
+		if (mode === 'noise') {
 			cache.coverage = new Float32Array(w * h);   // coverage of the current pass
 			cache.remaining = new Float32Array(w * h).fill(1); // what earlier passes left uncovered
 			cache.original = new Map();                 // pixel colour before the stroke touched it
+			return;
+		}
+		const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;   // already a fresh copy
+		cache.source = sourceLayer(data, w, h);
+		const name = selectedPresetName(mode);
+		if (mode === 'edge') {
+			cache.target = settings.use_brush_color ? color : null;
+			cache.preset = selectedPreset('edge');
+			cache.presetOpt = presetOptions('edge', cache.preset ? name : '');
+			cache.levels = { both: [cache.source], h: [cache.source], v: [cache.source] };
+		} else {
+			const P = selectedPreset(mode);
+			cache.line = lineLayer(cache.source, settings, P, presetOptions(mode, P ? name : ''), color);
 		}
 	}
 
@@ -731,19 +937,15 @@
 				horizontal: mode === 'h' && settings.horizontal,
 				vertical: mode === 'v' && settings.vertical
 			});
-			levels.push(edgeLayer(levels[levels.length - 1], s, cache.target, cache.preset, levels.length - 1));
+			levels.push(edgeLayer(levels[levels.length - 1], s, cache.target, cache.preset, levels.length - 1, cache.presetOpt));
 		}
 		return levels[level];
 	}
 
-	function edgePixel(x, y, px, alpha, opts) {
-		const i = y * cache.w + x;
-		if (isNewPass(i) && settings.grow_on_repeat) {
-			cache.passes[i] = Math.min(Math.max(0, settings.max_growth | 0), cache.passes[i] + 1);
-		}
-		const layer = edgeResult(1 + cache.passes[i]);
+	/** Blends the current pixel towards the worked-out result at that pixel. */
+	function blendTowards(layer, x, y, px, alpha, opts) {
 		layer.ensure(x, y, x, y);
-		const o = layer.data, j = i * 4;
+		const o = layer.data, j = (y * cache.w + x) * 4;
 		if (o[j + 3] === 0) return px;
 		const opacity = typeof opts.opacity === 'number' ? opts.opacity : 1;
 		const a = Math.max(0, Math.min(1, alpha * opacity));
@@ -753,6 +955,14 @@
 			b: px.b + (o[j + 2] - px.b) * a,
 			a: px.a
 		};
+	}
+
+	function edgePixel(x, y, px, alpha, opts) {
+		const i = y * cache.w + x;
+		if (isNewPass(i) && settings.grow_on_repeat) {
+			cache.passes[i] = Math.min(Math.max(0, settings.max_growth | 0), cache.passes[i] + 1);
+		}
+		return blendTowards(edgeResult(1 + cache.passes[i]), x, y, px, alpha, opts);
 	}
 
 	function noisePixel(x, y, px, alpha, opts) {
@@ -787,12 +997,14 @@
 		if (typeof Painter !== 'undefined' && Painter.lock_alpha && px.a === 0) return px;
 		const color = getBrushColor(opts);
 		if (!cache || cache.mode !== activeMode || cache.texture !== texture || !sameColor(cache.color, color)) {
-			if (!color && activeMode === 'noise') return px;
+			if (!color && activeMode !== 'edge') return px;
 			startCache(texture, color, activeMode);
 		}
 		trackBrush(opts);
 		if (x < 0 || y < 0 || x >= cache.w || y >= cache.h) return px;
-		return activeMode === 'noise' ? noisePixel(x, y, px, alpha, opts) : edgePixel(x, y, px, alpha, opts);
+		if (activeMode === 'noise') return noisePixel(x, y, px, alpha, opts);
+		if (activeMode === 'edge') return edgePixel(x, y, px, alpha, opts);
+		return blendTowards(cache.line, x, y, px, alpha, opts);
 	}
 
 	function setMode(mode) {
@@ -800,7 +1012,8 @@
 		clearCache();
 		const brush = BarItems.brush_tool;
 		if (brush && brush.setIcon) brush.setIcon(activeMode ? MODES[activeMode].icon : original.icon);
-		if (activeMode === 'edge' && !presets.length) reloadPresets(true);
+		// first use of a preset brush: ask for the preset folder
+		if (activeMode && KINDS[activeMode] && isApp && !presetFs) reloadPresets(true);
 		if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
 		refreshPanel();
 	}
@@ -819,15 +1032,28 @@
 		return c.toDataURL();
 	}
 
-	// A sample edge, so random mode has something to show.
-	function randomSampleUrl() {
+	// A sample edge with a step in it, to show what a brush does.
+	function sampleEdge() {
 		const w = 32, h = 16, d = new Uint8ClampedArray(w * h * 4);
+		const edge = (x) => x < 12 ? 9 : x < 20 ? 6 : 8;
 		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-			const v = y < h / 2 ? 214 : 70;
+			const v = y < edge(x) ? 150 : 60;
 			d.set([v, v, v, 255], (y * w + x) * 4);
 		}
-		const s = Object.assign({}, settings, { horizontal: true, vertical: false });
-		return imageToUrl(processImage(d, w, h, s, null, null), w, h);
+		return { d, w, h };
+	}
+
+	function sampleUrl(kind) {
+		const { d, w, h } = sampleEdge();
+		const name = selectedPresetName(kind);
+		const P = selectedPreset(kind);
+		const opt = presetOptions(kind, P ? name : '');
+		if (kind === 'edge') {
+			const target = settings.use_brush_color ? [150, 150, 150] : null;
+			return imageToUrl(processImage(d, w, h, settings, target, P, 1, opt), w, h);
+		}
+		const col = getBrushColor(null) || (kind === 'highlight' ? [230, 230, 230] : [20, 20, 20]);
+		return imageToUrl(processLines(d, w, h, settings, P, opt, col), w, h);
 	}
 
 	// One dab and three dabs of the noise brush on a flat surface.
@@ -850,14 +1076,20 @@
 	}
 
 	const PREVIEW_MAX_PIXELS = 512 * 512;
-	function texturePreviewUrl() {
+	function texturePreviewUrl(kind) {
 		const texture = currentTexture();
 		if (!texture || !texture.canvas || !texture.canvas.width) return '';
 		const c = texture.canvas, w = c.width, h = c.height;
 		if (w * h > PREVIEW_MAX_PIXELS) return 'too_large';
 		const data = c.getContext('2d').getImageData(0, 0, w, h).data;
-		const target = settings.use_brush_color ? getBrushColor(null) : null;
-		return imageToUrl(processImage(data, w, h, settings, target, selectedPreset()), w, h);
+		const color = getBrushColor(null);
+		const P = selectedPreset(kind);
+		const opt = presetOptions(kind, P ? selectedPresetName(kind) : '');
+		if (kind === 'edge') {
+			return imageToUrl(processImage(data, w, h, settings, settings.use_brush_color ? color : null, P, 1, opt), w, h);
+		}
+		if (!color) return '';
+		return imageToUrl(processLines(data, w, h, settings, P, opt, color), w, h);
 	}
 
 	let refreshTimer = null;
@@ -866,25 +1098,32 @@
 		clearTimeout(refreshTimer);
 		refreshTimer = setTimeout(() => {
 			const vue = panel.vue;
-			vue.mode = activeMode;
-			vue.presets = presets.map(p => ({ name: p.name, url: p.url, error: p.error }));
-			vue.selected = settings.preset;
+			const mode = activeMode;
+			vue.mode = mode;
 			vue.is_app = isApp;
 			vue.noise = {
 				density: settings.noise_density, falloff: settings.noise_falloff,
 				grain: settings.noise_grain, seed: settings.noise_seed
 			};
-			if (!activeMode) return;
+			if (!mode) return;
 			try {
-				if (activeMode === 'noise') {
+				if (mode === 'noise') {
 					vue.preview_url = noiseSampleUrl();
-				} else {
-					const p = presets.find(p => p.name === settings.preset);
-					vue.preview_url = p ? p.url : randomSampleUrl();
-					const url = texturePreviewUrl();
-					vue.texture_too_large = url === 'too_large';
-					vue.texture_url = url === 'too_large' ? '' : url;
+					return;
 				}
+				const kind = mode;
+				const name = selectedPresetName(kind);
+				const p = presets[kind].find(p => p.name === name);
+				vue.builtin = KINDS[kind].builtin;
+				vue.builtin_icon = KINDS[kind].builtin_icon;
+				vue.presets = presets[kind].map(p => ({ name: p.name, url: p.url, error: p.error }));
+				vue.selected = name;
+				vue.options = presetOptions(kind, p ? name : '');
+				vue.preview_url = p ? p.url : '';
+				vue.sample_url = sampleUrl(kind);
+				const url = texturePreviewUrl(kind);
+				vue.texture_too_large = url === 'too_large';
+				vue.texture_url = url === 'too_large' ? '' : url;
 			} catch (e) {
 				console.warn('Edge Noise Brush preview failed', e);
 			}
@@ -909,15 +1148,16 @@
 				step_depth: { label: 'Max step depth (px)', type: 'number', value: s.step_depth, min: 1, max: 8 },
 				segment_length: { label: 'Max segment length (px)', type: 'number', value: s.segment_length, min: 1, max: 32 },
 				_a: '_',
+				_e: { type: 'info', text: 'Edges, for the edge, highlight and shadow brushes:' },
 				horizontal: { label: 'Horizontal edges', type: 'checkbox', value: s.horizontal },
 				vertical: { label: 'Vertical edges', type: 'checkbox', value: s.vertical },
 				follow_stroke: { label: 'Follow stroke direction', type: 'checkbox', value: s.follow_stroke,
-					description: 'Strokes going up or down only break up vertical edges, with the pattern turned to run along them. Sideways strokes only break up horizontal edges.' },
+					description: 'Edge Noise Brush only. Strokes going up or down only break up vertical edges, with the pattern turned to run along them. Sideways strokes only break up horizontal edges.' },
 				threshold: { label: 'Edge threshold', type: 'number', value: s.threshold, min: 1, max: 255 },
 				seed: { label: 'Seed', type: 'number', value: s.seed, min: 0, max: 99999 }
 			},
 			onConfirm(result) {
-				for (const key in result) if (key in DEFAULTS) settings[key] = result[key];
+				for (const key in result) if (key in DEFAULTS && key !== 'preset_options') settings[key] = result[key];
 				saveSettings();
 				clearCache();
 				refreshPanel();
@@ -955,9 +1195,13 @@
 					return {
 						mode: null,
 						is_app: isApp,
+						builtin: '',
+						builtin_icon: '',
 						presets: [],
 						selected: '',
+						options: {},
 						preview_url: '',
+						sample_url: '',
 						texture_url: '',
 						texture_too_large: false,
 						noise: { density: 0, falloff: 0, grain: 1, seed: 1 }
@@ -967,50 +1211,100 @@
 					selected_error() {
 						const p = this.presets.find(p => p.name === this.selected);
 						return p ? p.error : '';
-					}
+					},
+					is_line() { return this.mode === 'highlight' || this.mode === 'shadow'; },
+					show_options() { return this.is_line || (this.mode === 'edge' && !!this.selected); }
 				},
 				methods: {
-					select(name) { selectPreset(name); },
+					select(name) { selectPreset(this.mode, name); },
 					remove(name) {
+						const kind = this.mode;
 						Blockbench.showMessageBox({
 							title: 'Delete preset',
 							message: `Delete the preset "${name}"?`,
 							buttons: ['dialog.confirm', 'dialog.cancel']
-						}, (button) => { if (button === 0) deletePreset(name); });
+						}, (button) => { if (button === 0) deletePreset(kind, name); });
 					},
-					importPresets,
-					saveTextureAsPreset,
-					openPresetFolder,
+					importPresets() { importPresets(this.mode); },
+					saveTextureAsPreset() { saveTextureAsPreset(this.mode); },
+					openPresetFolder() { openPresetFolder(this.mode); },
 					reload() { reloadPresets(true); },
 					openSettings,
 					refresh() { refreshPanel(); },
-					setNoise(key, event) { setNoiseSetting(key, event.target.value); }
+					setNoise(key, event) { setNoiseSetting(key, event.target.value); },
+					setOption(key, value) { setPresetOption(this.mode, this.selected, key, value); }
 				},
 				template: `
 					<div class="edge_noise_panel">
-						<template v-if="mode === 'edge'">
+						<template v-if="mode && mode !== 'noise'">
 							<div class="edge_noise_bar">
 								<div class="tool" title="Add presets from PNG files" @click="importPresets()"><i class="material-icons">add_photo_alternate</i></div>
-								<div class="tool" title="Save the selected area of the texture as a preset (the whole texture if nothing is selected)" @click="saveTextureAsPreset()"><i class="material-icons">highlight_alt</i></div>
+								<div class="tool" title="New preset from the selected area of the texture (the whole texture if nothing is selected)" @click="saveTextureAsPreset()"><i class="material-icons">highlight_alt</i></div>
 								<div class="tool" v-if="is_app" title="Open preset folder" @click="openPresetFolder()"><i class="material-icons">folder_open</i></div>
 								<div class="tool" title="Reload presets" @click="reload()"><i class="material-icons">refresh</i></div>
 								<div class="tool" title="Brush settings" @click="openSettings()"><i class="material-icons">tune</i></div>
 							</div>
 							<ul class="edge_noise_list">
 								<li :class="{selected: selected === ''}" @click="select('')">
-									<i class="material-icons">shuffle</i><span>Random steps</span>
+									<i class="material-icons">{{ builtin_icon }}</i><span>{{ builtin }}</span>
 								</li>
 								<li v-for="p in presets" :key="p.name" :class="{selected: selected === p.name, broken: !!p.error}" @click="select(p.name)" :title="p.error || p.name">
 									<img :src="p.url"><span>{{ p.name }}</span>
 									<i class="material-icons edge_noise_delete" title="Delete preset" @click.stop="remove(p.name)">delete</i>
 								</li>
 							</ul>
-							<p class="edge_noise_hint" v-if="!presets.length">
+							<p class="edge_noise_hint" v-if="!presets.length && mode === 'edge'">
 								No presets yet. Select an area of a texture showing the edge you want and click the selection button above, or add a PNG with a bright side and a dark side.
 							</p>
+							<p class="edge_noise_hint" v-if="!presets.length && is_line">
+								No presets yet. Draw a line with the gaps and thickness you want over a plain background, select it and click the selection button above, or add it as a PNG.
+							</p>
 							<p class="edge_noise_error" v-if="selected_error">{{ selected_error }}</p>
-							<label>{{ selected ? 'Preset' : 'Random steps sample' }}</label>
-							<img class="edge_noise_preview" v-if="preview_url" :src="preview_url">
+
+							<template v-if="show_options">
+								<template v-if="mode === 'edge'">
+									<div class="edge_noise_slider" title="How far the steps reach into the neighbouring tone. 2 doubles every step.">
+										<span>Depth</span>
+										<input type="range" min="1" max="8" :value="options.depth" @change="setOption('depth', $event.target.value)">
+										<span class="edge_noise_value">×{{ options.depth }}</span>
+									</div>
+								</template>
+								<template v-else>
+									<div class="edge_noise_slider" title="How thick the line is drawn. 2 makes every pixel of the preset two pixels deep.">
+										<span>Thickness</span>
+										<input type="range" min="1" max="8" :value="options.thickness" @change="setOption('thickness', $event.target.value)">
+										<span class="edge_noise_value">×{{ options.thickness }}</span>
+									</div>
+									<div class="edge_noise_slider" title="How many pixels between the edge and the line.">
+										<span>Distance</span>
+										<input type="range" min="0" max="16" :value="options.offset" @change="setOption('offset', $event.target.value)">
+										<span class="edge_noise_value">{{ options.offset }}px</span>
+									</div>
+									<div class="edge_noise_slider">
+										<span>Side</span>
+										<select :value="options.side" @change="setOption('side', $event.target.value)">
+											<option value="bright">Brighter tone</option>
+											<option value="dark">Darker tone</option>
+										</select>
+									</div>
+									<div class="edge_noise_slider" v-if="selected" title="Use the bottom of the preset against the edge instead of the top.">
+										<span>Flip</span>
+										<input type="checkbox" :checked="options.flip" @change="setOption('flip', $event.target.checked)">
+									</div>
+								</template>
+								<div class="edge_noise_slider" v-if="selected" title="Stretches the pattern along the edge. 2 makes every pixel of the preset two pixels long.">
+									<span>Length</span>
+									<input type="range" min="1" max="8" :value="options.length" @change="setOption('length', $event.target.value)">
+									<span class="edge_noise_value">×{{ options.length }}</span>
+								</div>
+							</template>
+
+							<template v-if="preview_url">
+								<label>Preset</label>
+								<img class="edge_noise_preview" :src="preview_url">
+							</template>
+							<label>On a sample edge</label>
+							<img class="edge_noise_preview" v-if="sample_url" :src="sample_url">
 							<label>Selected texture with this brush <i class="material-icons edge_noise_refresh" title="Refresh" @click="refresh()">refresh</i></label>
 							<img class="edge_noise_preview" v-if="texture_url" :src="texture_url">
 							<p class="edge_noise_hint" v-else-if="texture_too_large">This texture is too large to preview.</p>
@@ -1066,9 +1360,10 @@
 		.edge_noise_hint { color: var(--color-subtle_text); font-size: 0.9em; }
 		.edge_noise_error { color: var(--color-close); font-size: 0.9em; }
 		.edge_noise_slider { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-		.edge_noise_slider > span:first-child { width: 56px; flex-shrink: 0; }
+		.edge_noise_slider > span:first-child { width: 64px; flex-shrink: 0; }
 		.edge_noise_slider input[type=range] { flex: 1; min-width: 0; }
 		.edge_noise_slider input[type=number] { width: 90px; }
+		.edge_noise_slider select { flex: 1; }
 		.edge_noise_value { width: 40px; text-align: right; color: var(--color-subtle_text); }
 	`;
 	let styleNode;
@@ -1144,9 +1439,9 @@
 	Plugin.register('edge_noise_brush', {
 		title: 'Edge Noise Brush',
 		author: 'Shapescape',
-		description: 'Brush modes that break straight edges between two tones into steps, randomly or following your own presets, and scatter noise over a surface.',
+		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.6.0',
+		version: '0.7.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

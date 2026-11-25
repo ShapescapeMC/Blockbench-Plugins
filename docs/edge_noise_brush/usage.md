@@ -45,7 +45,14 @@ You can also draw one from scratch, the way the finished edge should look:
 
 The brush repeats the edge's shape along every edge you paint over, horizontal and vertical. With `Grow brush colour only` on, the edge is shifted so the colour you paint with only ever grows. When the brush colour is the brighter tone, the bright side of the preset grows into the dark one, and the other way round. With it off, both tones move, and the straight edge sits at the preset's middle line.
 
-Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder. Click the folder button in the panel to open it. You can copy PNGs straight into the folder and click reload.
+Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder. Click the folder button in the panel to open it. You can copy PNGs straight into the folder and click reload. Highlight and shadow presets go in the `highlights` and `shadows` folders inside it.
+
+### Preset options
+
+Each preset keeps its own options, shown in the panel under the list when it is selected:
+
+- `Depth`: scales how far the steps reach. At ×2 every step is twice as deep.
+- `Length`: stretches the pattern along the edge. At ×2 every pixel of the preset covers two pixels of the edge.
 
 ## Settings
 
@@ -77,3 +84,41 @@ It only ever places the brush colour, at the brush opacity. Hold Alt to pick the
 - `Seed`: changes the pattern.
 
 The panel shows what one pass and three passes over the same spot look like in the current brush colour. Brush softness also thins out the edge of the brush, on top of `Falloff`.
+
+## Highlight Brush and Shadow Brush
+
+The Highlight Brush and the Shadow Brush are two more modes in the Brush tool's dropdown. They draw a line of the brush colour along the edges you brush over, following the edge's outline, steps and all. Break an edge up with the Edge Noise Brush first, then brush over it with these to add a highlight or a shadow that follows every step.
+
+They work the same way and only differ in their starting options: highlights sit on the brighter side of the edge, shadows on the darker side. Pick the highlight or shadow colour as the brush colour, or hold Alt to pick it from the texture. Brush opacity applies. Going back over a spot in the same stroke does not thicken the line, so you can brush over it freely.
+
+Without a preset, the line is a plain unbroken line, one pixel thick. A preset decides where the line breaks and how thick it gets.
+
+### Line presets
+
+A line preset is a PNG of a line drawn over a plain background, the way the finished highlight or shadow should look if the edge were straight:
+
+```
+................
+.####..###.#####
+.##.....#...##..
+................
+```
+
+- Draw the line with the gaps and changes in thickness you want. The top row of the line is the row against the edge, and thicker parts grow away from it.
+- The line can be drawn running across or up and down.
+- The line is whichever tone there is less of, so a light line on a dark background and a dark line on a light background both work. On a transparent background, the line is everything that is not transparent.
+- The width of the image is the length of the pattern before it repeats.
+
+As with edge presets, the quickest way is to draw the line on a texture, select it with the selection tool and click the selection button in the panel. It is saved to the brush you have active.
+
+### Line options
+
+Each line preset, and the plain line, keeps its own options in the panel:
+
+- `Thickness`: scales how thick the line is drawn. At ×2 every pixel of the preset is two pixels deep. Use it to keep shadows heavier than highlights.
+- `Distance`: how many pixels between the edge and the line. At 0 the line touches the edge.
+- `Side`: whether the line sits on the brighter or the darker side of the edge.
+- `Flip`: puts the bottom of the preset against the edge instead of the top.
+- `Length`: stretches the pattern along the edge.
+
+The `Horizontal edges`, `Vertical edges` and `Edge threshold` settings apply to these brushes too. `Follow stroke direction` does not: the line always follows both the flat runs and the steps of an edge, so it stays joined up.

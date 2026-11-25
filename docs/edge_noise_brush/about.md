@@ -12,4 +12,6 @@ By default only the colour selected in the colour panel grows, stepping outward 
 
 Sliding the brush along an edge breaks it up once. Going back over it without letting go grows the brush colour another step each time, so you can push an edge further by scrubbing.
 
+The Highlight Brush and the Shadow Brush draw a line of the brush colour along the edges you brush over, following every step of them, with breaks and thickness taken from your own line presets. Break an edge up first, then brush over it to add a highlight or a shadow.
+
 The plugin also adds a Noise Brush, which scatters the brush colour over any surface, densest in the middle of the brush and thinning out towards its edge. Scrubbing over a spot fills it in further. It is meant for starting texture on a flat area with a big brush.

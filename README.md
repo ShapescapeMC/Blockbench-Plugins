@@ -11,7 +11,7 @@ This plugin renders the model you have open into finished images and GIFs: still
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
 ### Edge Noise Brush
-This plugin adds two modes to the Brush tool. The Edge Noise Brush breaks up straight edges between two tones into pixel steps, using only the colours already on either side, randomly or following presets made from areas of your own textures. The Noise Brush scatters the brush colour over a surface, densest in the middle of the brush. Going back over a spot in one stroke grows either effect further.
+This plugin adds four modes to the Brush tool for pixel art edges and surfaces. The Edge Noise Brush breaks up straight edges between two tones into pixel steps, using only the colours already on either side. The Highlight and Shadow Brushes then draw lines along those edges, following every step. The Noise Brush scatters the brush colour over a surface. The edge, highlight and shadow patterns come from presets you make from areas of your own textures, each with its own thickness and length.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/edge_noise_brush/about.html)
 
