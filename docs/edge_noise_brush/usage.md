@@ -45,7 +45,7 @@ You can also draw one from scratch, the way the finished edge should look:
 
 The brush repeats the edge's shape along every edge you paint over, horizontal and vertical. With `Grow brush colour only` on, the edge is shifted so the colour you paint with only ever grows. When the brush colour is the brighter tone, the bright side of the preset grows into the dark one, and the other way round. With it off, both tones move, and the straight edge sits at the preset's middle line.
 
-Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder. Click the folder button in the panel to open it. You can copy PNGs straight into the folder and click reload. Highlight and shadow presets go in the `highlights` and `shadows` folders inside it.
+Presets are stored as PNG files in the `edge_noise_presets` folder in Blockbench's user data folder. Click the folder button in the panel to open it. You can copy PNGs straight into the folder and click reload. Highlight, shadow and noise presets go in the `highlights`, `shadows` and `noise` folders inside it.
 
 ### Preset options
 
@@ -76,14 +76,25 @@ Two colours with almost the same brightness may not be seen as an edge. Lower `E
 
 The Noise Brush is a second mode in the Brush tool's dropdown, for surfaces rather than edges. It scatters the brush colour as single pixels or small clumps, densest in the middle of the brush and thinning out towards its edge. Use a big brush to start texture on a flat area, then scrub back and forth over the spots you want fuller. Each time the brush comes back over a spot without letting go, more of it fills in. A new stroke starts afresh.
 
-It only ever places the brush colour, at the brush opacity. Hold Alt to pick the colour. While it is active, the Brush icon turns into a dotted circle and the panel on the right shows its settings:
+It only ever places the brush colour, at the brush opacity. Hold Alt to pick the colour. While it is active, the Brush icon turns into a dotted circle and the panel on the right shows its presets and settings:
 
 - `Density`: how full the middle of the brush gets on the first pass.
 - `Falloff`: how much thinner the noise gets towards the edge of the brush. At 0 it is even across the whole brush.
-- `Grain`: the size of the clumps in pixels. 1 gives single pixels.
+- `Grain`: the size of the clumps of `Random noise` in pixels. 1 gives single pixels.
 - `Seed`: changes the pattern.
 
 The panel shows what one pass and three passes over the same spot look like in the current brush colour. Brush softness also thins out the edge of the brush, on top of `Falloff`.
+
+### Noise presets
+
+A noise preset is a PNG of the specks and clumps you want, drawn over a plain background. The noise is whichever tone there is less of, or everything that is not transparent on a transparent background. As with the other presets, the quickest way is to draw it on a texture, select it with the selection tool and click the selection button in the panel while the Noise Brush is active.
+
+The preset is repeated across the texture, and the brush shows it clump by clump: pixels that touch side by side form one clump, and each clump appears whole or not at all, so the shapes you drew are never broken up. `Density` and `Falloff` decide how many clumps show, and at full density in the middle of the brush the whole pattern shows. Nothing outside the drawn clumps is ever painted.
+
+Each noise preset has its own options:
+
+- `Scale`: draws every pixel of the preset this many pixels wide and tall.
+- `Shuffle`: on by default. Starts each repeat of the preset at a random point and mirrors some, so the repeat does not show as a grid.
 
 ## Highlight Brush and Shadow Brush
 

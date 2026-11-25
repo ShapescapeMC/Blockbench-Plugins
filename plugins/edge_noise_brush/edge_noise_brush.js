@@ -38,6 +38,7 @@
 		noise_falloff: 70,   // % the density drops from the middle to the edge of the brush
 		noise_grain: 1,      // size of the noise clumps in px
 		noise_seed: 1,
+		noise_preset: '',     // noise preset name, '' = random noise
 		highlight_preset: '', // line preset names, '' = plain solid line
 		shadow_preset: '',
 		preset_options: {}    // 'kind/name' -> options for that preset
@@ -360,29 +361,41 @@
 	 * Returns bits[row * period + x] = 1 where the line is, normalised to run
 	 * horizontally. Row 0 is the row nearest the edge.
 	 */
-	function parseLinePreset(data, w, h) {
+	/**
+	 * Separates something drawn over a plain background: the opaque pixels if
+	 * there are transparent ones, otherwise the less common of the two tones.
+	 * Returns a mask, 1 where the drawing is, or null if there is no contrast.
+	 */
+	function foregroundMask(data, w, h) {
 		const n = w * h;
 		let transparent = 0;
 		for (let i = 0; i < n; i++) if (data[i * 4 + 3] < 128) transparent++;
-		let line = new Uint8Array(n);
+		const mask = new Uint8Array(n);
 		if (transparent > 0 && transparent < n) {
-			for (let i = 0; i < n; i++) line[i] = data[i * 4 + 3] >= 128 ? 1 : 0;
-		} else {
-			let lo = Infinity, hi = -Infinity;
-			for (let i = 0; i < n; i++) { const l = lumAt(data, i); lo = Math.min(lo, l); hi = Math.max(hi, l); }
-			if (!(hi - lo > 1)) throw 'The image needs a line drawn over a plain background.';
-			let split = (lo + hi) / 2;
-			for (let iter = 0; iter < 8; iter++) {
-				let sa = 0, ca = 0, sb = 0, cb = 0;
-				for (let i = 0; i < n; i++) { const l = lumAt(data, i); if (l > split) { sa += l; ca++; } else { sb += l; cb++; } }
-				if (!ca || !cb) break;
-				split = (sa / ca + sb / cb) / 2;
-			}
-			let brightCount = 0;
-			for (let i = 0; i < n; i++) if (lumAt(data, i) > split) brightCount++;
-			const lineIsBright = brightCount <= n - brightCount;
-			for (let i = 0; i < n; i++) line[i] = (lumAt(data, i) > split) === lineIsBright ? 1 : 0;
+			for (let i = 0; i < n; i++) mask[i] = data[i * 4 + 3] >= 128 ? 1 : 0;
+			return mask;
 		}
+		let lo = Infinity, hi = -Infinity;
+		for (let i = 0; i < n; i++) { const l = lumAt(data, i); lo = Math.min(lo, l); hi = Math.max(hi, l); }
+		if (!(hi - lo > 1)) return null;
+		let split = (lo + hi) / 2;
+		for (let iter = 0; iter < 8; iter++) {
+			let sa = 0, ca = 0, sb = 0, cb = 0;
+			for (let i = 0; i < n; i++) { const l = lumAt(data, i); if (l > split) { sa += l; ca++; } else { sb += l; cb++; } }
+			if (!ca || !cb) break;
+			split = (sa / ca + sb / cb) / 2;
+		}
+		let brightCount = 0;
+		for (let i = 0; i < n; i++) if (lumAt(data, i) > split) brightCount++;
+		const fgIsBright = brightCount <= n - brightCount;
+		for (let i = 0; i < n; i++) mask[i] = (lumAt(data, i) > split) === fgIsBright ? 1 : 0;
+		return mask;
+	}
+
+	function parseLinePreset(data, w, h) {
+		const n = w * h;
+		let line = foregroundMask(data, w, h);
+		if (!line) throw 'The image needs a line drawn over a plain background.';
 
 		let minX = w, maxX = -1, minY = h, maxY = -1;
 		for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -643,6 +656,58 @@
 		return Math.max(0, Math.min(1, v * 0.8 + white * 0.2));
 	}
 
+	/**
+	 * Learns a noise pattern from a preset image: specks or clumps drawn over a
+	 * plain background. Each clump (pixels touching side by side) is kept
+	 * whole, so the brush shows or hides entire clumps rather than breaking
+	 * them up.
+	 */
+	function parseNoisePreset(data, w, h) {
+		const mask = foregroundMask(data, w, h);
+		if (!mask || !mask.some(v => v)) throw 'The image needs noise drawn over a plain background.';
+		const clump = new Int32Array(w * h).fill(-1);
+		let count = 0;
+		const stack = [];
+		for (let start = 0; start < w * h; start++) {
+			if (!mask[start] || clump[start] >= 0) continue;
+			clump[start] = count;
+			stack.push(start);
+			while (stack.length) {
+				const i = stack.pop(), x = i % w, y = (i - x) / w;
+				for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+					if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+					const j = ny * w + nx;
+					if (mask[j] && clump[j] < 0) { clump[j] = count; stack.push(j); }
+				}
+			}
+			count++;
+		}
+		return { w, h, clump, count };
+	}
+
+	/**
+	 * Threshold for a pixel with a noise preset: the preset is tiled over the
+	 * texture, every clump in every tile gets its own random threshold, and
+	 * pixels outside the clumps never fill. opt: { scale, shuffle }, where
+	 * shuffle starts each tile at a random point and mirrors some, to hide the
+	 * repeat.
+	 */
+	function noisePresetThreshold(x, y, P, opt, s) {
+		const seed = (s.noise_seed | 0) * 31 + 11;
+		const scale = scaleOf(opt && opt.scale);
+		const X = Math.floor(x / scale), Y = Math.floor(y / scale);
+		const tx = Math.floor(X / P.w), ty = Math.floor(Y / P.h);
+		let lx = X - tx * P.w, ly = Y - ty * P.h;
+		if (opt && opt.shuffle) {
+			lx = (lx + Math.floor(hash(tx, ty, 31, seed) * P.w)) % P.w;
+			ly = (ly + Math.floor(hash(tx, ty, 32, seed) * P.h)) % P.h;
+			if (hash(tx, ty, 33, seed) < 0.5) lx = P.w - 1 - lx;
+		}
+		const c = P.clump[ly * P.w + lx];
+		if (c < 0) return 2;
+		return hash(c, tx * 7919 + ty, 34, seed);
+	}
+
 	/** Coverage one pass of the brush gives a pixel at distance d (0 = centre, 1 = edge). */
 	function noiseCoverage(s, d, localOpacity) {
 		const density = Math.max(0, Math.min(1, s.noise_density / 100));
@@ -652,7 +717,7 @@
 	}
 
 	if (typeof module !== 'undefined' && module.exports) {
-		module.exports = { processImage, processLines, parsePreset, parseLinePreset, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
+		module.exports = { processImage, processLines, parsePreset, parseLinePreset, parseNoisePreset, noisePresetThreshold, sourceLayer, edgeLayer, noiseThreshold, noiseCoverage, DEFAULTS };
 	}
 	if (typeof Plugin === 'undefined') return;
 
@@ -679,13 +744,25 @@
 	const KINDS = {
 		edge: { folder: '', setting: 'preset', builtin: 'Random steps', builtin_icon: 'shuffle', title: 'Edge Noise Preset' },
 		highlight: { folder: 'highlights', setting: 'highlight_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Highlight Preset' },
-		shadow: { folder: 'shadows', setting: 'shadow_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Shadow Preset' }
+		shadow: { folder: 'shadows', setting: 'shadow_preset', builtin: 'Solid line', builtin_icon: 'horizontal_rule', title: 'Shadow Preset' },
+		noise: { folder: 'noise', setting: 'noise_preset', builtin: 'Random noise', builtin_icon: 'blur_on', title: 'Noise Preset' }
 	};
 	const OPTION_DEFAULTS = {
 		edge: { depth: 1, length: 1 },
 		highlight: { thickness: 1, length: 1, offset: 0, side: 'bright', flip: false },
-		shadow: { thickness: 1, length: 1, offset: 0, side: 'dark', flip: false }
+		shadow: { thickness: 1, length: 1, offset: 0, side: 'dark', flip: false },
+		noise: { scale: 1, shuffle: true }
 	};
+
+	// Every icon the plugin adds gets a thin outline in this colour.
+	const OUTLINE_COLOR = '#d7263d';
+
+	/** An icon node carrying the outline. */
+	function outlinedIcon(name) {
+		const node = Blockbench.getIconNode(name);
+		node.classList.add('edge_noise_icon');
+		return node;
+	}
 
 	let activeMode = null;   // null = normal brush, or a key of MODES
 	let cache = null;        // per-stroke state, rebuilt at stroke start
@@ -700,7 +777,7 @@
 	/* --- presets --- */
 
 	// kind -> [{ name, url (data URL), parsed, error }]
-	const presets = { edge: [], highlight: [], shadow: [] };
+	const presets = { edge: [], highlight: [], shadow: [], noise: [] };
 	let presetFs = null, presetRoot = null, path = null;
 
 	function presetFolder(kind) {
@@ -752,7 +829,8 @@
 		const preset = { name, url, parsed: null, error: '' };
 		try {
 			const img = await loadImageData(url);
-			preset.parsed = kind === 'edge' ? parsePreset(img.data, img.width, img.height) : parseLinePreset(img.data, img.width, img.height);
+			const parse = kind === 'edge' ? parsePreset : kind === 'noise' ? parseNoisePreset : parseLinePreset;
+			preset.parsed = parse(img.data, img.width, img.height);
 		} catch (e) {
 			preset.error = String(e);
 		}
@@ -908,7 +986,7 @@
 		const id = kind + '/' + (name || '');
 		const opt = Object.assign({}, settings.preset_options[id] || {});
 		if (key === 'side') opt.side = value === 'bright' ? 'bright' : 'dark';
-		else if (key === 'flip') opt.flip = !!value;
+		else if (key === 'flip' || key === 'shuffle') opt[key] = !!value;
 		else {
 			const max = key === 'offset' ? 16 : 8, min = key === 'offset' ? 0 : 1;
 			const v = Math.round(Number(value));
@@ -970,6 +1048,8 @@
 			cache.coverage = new Float32Array(w * h);   // coverage of the current pass
 			cache.remaining = new Float32Array(w * h).fill(1); // what earlier passes left uncovered
 			cache.original = new Map();                 // pixel colour before the stroke touched it
+			cache.noisePreset = selectedPreset('noise');
+			cache.noiseOpt = presetOptions('noise', cache.noisePreset ? selectedPresetName('noise') : '');
 			return;
 		}
 		const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;   // already a fresh copy
@@ -1058,7 +1138,10 @@
 		const c = noiseCoverage(settings, d, Math.max(0, Math.min(1, alpha)));
 		if (c > cache.coverage[i]) cache.coverage[i] = c;
 		const filled = 1 - cache.remaining[i] * (1 - cache.coverage[i]);
-		if (noiseThreshold(x, y, settings) >= filled) return px;
+		const threshold = cache.noisePreset
+			? noisePresetThreshold(x, y, cache.noisePreset, cache.noiseOpt, settings)
+			: noiseThreshold(x, y, settings);
+		if (threshold >= filled) return px;
 
 		const orig = cache.original.get(i), col = cache.color;
 		const opacity = typeof opts.opacity === 'number' ? Math.max(0, Math.min(1, opts.opacity)) : 1;
@@ -1091,6 +1174,8 @@
 		clearCache();
 		const brush = BarItems.brush_tool;
 		if (brush && brush.setIcon) brush.setIcon(activeMode ? MODES[activeMode].icon : original.icon);
+		// outlines the Brush tool's icon wherever it shows while one of these modes is on
+		document.body.classList.toggle('edge_noise_brush_active', !!activeMode);
 		// first use of a preset brush: ask for the preset folder
 		if (activeMode && KINDS[activeMode] && isApp && !presetFs) reloadPresets(true);
 		if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
@@ -1137,6 +1222,9 @@
 
 	// One dab and three dabs of the noise brush on a flat surface.
 	function noiseSampleUrl() {
+		const P = selectedPreset('noise');
+		const opt = presetOptions('noise', P ? selectedPresetName('noise') : '');
+		const threshold = (x, y) => P ? noisePresetThreshold(x, y, P, opt, settings) : noiseThreshold(x, y, settings);
 		const size = 40, w = size * 2 + 4, h = size, d = new Uint8ClampedArray(w * h * 4);
 		const col = getBrushColor(null) || [255, 255, 255];
 		const bg = (col[0] + col[1] + col[2]) / 3 > 128 ? 60 : 190;
@@ -1148,7 +1236,7 @@
 				const c = noiseCoverage(settings, dist, 1);
 				const filled = 1 - Math.pow(1 - c, passes);
 				const tx = x + ox;
-				if (noiseThreshold(tx, y, settings) < filled) d.set([col[0], col[1], col[2], 255], (y * w + tx) * 4);
+				if (threshold(tx, y) < filled) d.set([col[0], col[1], col[2], 255], (y * w + tx) * 4);
 			}
 		}
 		return imageToUrl(d, w, h);
@@ -1186,10 +1274,6 @@
 			};
 			if (!mode) return;
 			try {
-				if (mode === 'noise') {
-					vue.preview_url = noiseSampleUrl();
-					return;
-				}
 				const kind = mode;
 				const name = selectedPresetName(kind);
 				const p = presets[kind].find(p => p.name === name);
@@ -1199,6 +1283,11 @@
 				vue.selected = name;
 				vue.options = presetOptions(kind, p ? name : '');
 				vue.preview_url = p ? p.url : '';
+				if (kind === 'noise') {
+					vue.sample_url = noiseSampleUrl();
+					vue.texture_url = '';
+					return;
+				}
 				vue.sample_url = sampleUrl(kind);
 				const url = texturePreviewUrl(kind);
 				vue.texture_too_large = url === 'too_large';
@@ -1292,7 +1381,7 @@
 						return p ? p.error : '';
 					},
 					is_line() { return this.mode === 'highlight' || this.mode === 'shadow'; },
-					show_options() { return this.is_line || (this.mode === 'edge' && !!this.selected); }
+					show_options() { return this.is_line || ((this.mode === 'edge' || this.mode === 'noise') && !!this.selected); }
 				},
 				methods: {
 					select(name) { selectPreset(this.mode, name); },
@@ -1315,13 +1404,13 @@
 				},
 				template: `
 					<div class="edge_noise_panel">
-						<template v-if="mode && mode !== 'noise'">
+						<template v-if="mode">
 							<div class="edge_noise_bar">
 								<div class="tool" title="Add presets from PNG files" @click="importPresets()"><i class="material-icons">add_photo_alternate</i></div>
 								<div class="tool" title="New preset from the selected area of the texture (the whole texture if nothing is selected)" @click="saveTextureAsPreset()"><i class="material-icons">highlight_alt</i></div>
 								<div class="tool" v-if="is_app" title="Open preset folder" @click="openPresetFolder()"><i class="material-icons">folder_open</i></div>
 								<div class="tool" title="Reload presets" @click="reload()"><i class="material-icons">refresh</i></div>
-								<div class="tool" title="Brush settings" @click="openSettings()"><i class="material-icons">tune</i></div>
+								<div class="tool" v-if="mode !== 'noise'" title="Brush settings" @click="openSettings()"><i class="material-icons">tune</i></div>
 							</div>
 							<ul class="edge_noise_list">
 								<li :class="{selected: selected === ''}" @click="select('')">
@@ -1338,6 +1427,9 @@
 							<p class="edge_noise_hint" v-if="!presets.length && is_line">
 								No presets yet. Draw a line with the gaps and thickness you want over a plain background, select it and click the selection button above, or add it as a PNG.
 							</p>
+							<p class="edge_noise_hint" v-if="!presets.length && mode === 'noise'">
+								No presets yet. Draw the specks and clumps you want over a plain background, select them and click the selection button above, or add them as a PNG.
+							</p>
 							<p class="edge_noise_error" v-if="selected_error">{{ selected_error }}</p>
 
 							<template v-if="show_options">
@@ -1346,6 +1438,17 @@
 										<span>Depth</span>
 										<input type="range" min="1" max="8" :value="options.depth" @change="setOption('depth', $event.target.value)">
 										<span class="edge_noise_value">×{{ options.depth }}</span>
+									</div>
+								</template>
+								<template v-else-if="mode === 'noise'">
+									<div class="edge_noise_slider" title="Draws every pixel of the preset this many pixels wide and tall.">
+										<span>Scale</span>
+										<input type="range" min="1" max="8" :value="options.scale" @change="setOption('scale', $event.target.value)">
+										<span class="edge_noise_value">×{{ options.scale }}</span>
+									</div>
+									<div class="edge_noise_slider" title="Starts each repeat of the preset at a random point, and mirrors some, so the pattern does not show a grid.">
+										<span>Shuffle</span>
+										<input type="checkbox" :checked="options.shuffle" @change="setOption('shuffle', $event.target.checked)">
 									</div>
 								</template>
 								<template v-else>
@@ -1371,10 +1474,32 @@
 										<input type="checkbox" :checked="options.flip" @change="setOption('flip', $event.target.checked)">
 									</div>
 								</template>
-								<div class="edge_noise_slider" v-if="selected" title="Stretches the pattern along the edge. 2 makes every pixel of the preset two pixels long.">
+								<div class="edge_noise_slider" v-if="selected && mode !== 'noise'" title="Stretches the pattern along the edge. 2 makes every pixel of the preset two pixels long.">
 									<span>Length</span>
 									<input type="range" min="1" max="8" :value="options.length" @change="setOption('length', $event.target.value)">
 									<span class="edge_noise_value">×{{ options.length }}</span>
+								</div>
+							</template>
+
+							<template v-if="mode === 'noise'">
+								<div class="edge_noise_slider" title="How full the middle of the brush gets on the first pass.">
+									<span>Density</span>
+									<input type="range" min="0" max="100" :value="noise.density" @change="setNoise('noise_density', $event)">
+									<span class="edge_noise_value">{{ noise.density }}%</span>
+								</div>
+								<div class="edge_noise_slider" title="How much thinner the noise gets towards the edge of the brush.">
+									<span>Falloff</span>
+									<input type="range" min="0" max="100" :value="noise.falloff" @change="setNoise('noise_falloff', $event)">
+									<span class="edge_noise_value">{{ noise.falloff }}%</span>
+								</div>
+								<div class="edge_noise_slider" v-if="!selected" title="Size of the clumps of random noise.">
+									<span>Grain</span>
+									<input type="range" min="1" max="8" :value="noise.grain" @change="setNoise('noise_grain', $event)">
+									<span class="edge_noise_value">{{ noise.grain }}px</span>
+								</div>
+								<div class="edge_noise_slider">
+									<span>Seed</span>
+									<input type="number" min="0" max="99999" :value="noise.seed" @change="setNoise('noise_seed', $event)">
 								</div>
 							</template>
 
@@ -1382,36 +1507,19 @@
 								<label>Preset</label>
 								<img class="edge_noise_preview" :src="preview_url">
 							</template>
-							<label>On a sample edge</label>
-							<img class="edge_noise_preview" v-if="sample_url" :src="sample_url">
-							<label>Selected texture with this brush <i class="material-icons edge_noise_refresh" title="Refresh" @click="refresh()">refresh</i></label>
-							<img class="edge_noise_preview" v-if="texture_url" :src="texture_url">
-							<p class="edge_noise_hint" v-else-if="texture_too_large">This texture is too large to preview.</p>
-							<p class="edge_noise_hint" v-else>Select a texture to preview it here.</p>
-						</template>
-						<template v-if="mode === 'noise'">
-							<div class="edge_noise_slider">
-								<span>Density</span>
-								<input type="range" min="0" max="100" :value="noise.density" @change="setNoise('noise_density', $event)">
-								<span class="edge_noise_value">{{ noise.density }}%</span>
-							</div>
-							<div class="edge_noise_slider">
-								<span>Falloff</span>
-								<input type="range" min="0" max="100" :value="noise.falloff" @change="setNoise('noise_falloff', $event)">
-								<span class="edge_noise_value">{{ noise.falloff }}%</span>
-							</div>
-							<div class="edge_noise_slider">
-								<span>Grain</span>
-								<input type="range" min="1" max="8" :value="noise.grain" @change="setNoise('noise_grain', $event)">
-								<span class="edge_noise_value">{{ noise.grain }}px</span>
-							</div>
-							<div class="edge_noise_slider">
-								<span>Seed</span>
-								<input type="number" min="0" max="99999" :value="noise.seed" @change="setNoise('noise_seed', $event)">
-							</div>
-							<label>One pass and three passes, in the brush colour</label>
-							<img class="edge_noise_preview" v-if="preview_url" :src="preview_url">
-							<p class="edge_noise_hint">Density is how full the middle of the brush gets on the first pass. Falloff thins it out towards the edge of the brush. Go back over a spot without letting go to fill it in further.</p>
+							<template v-if="mode === 'noise'">
+								<label>One pass and three passes, in the brush colour</label>
+								<img class="edge_noise_preview" v-if="sample_url" :src="sample_url">
+								<p class="edge_noise_hint">{{ selected ? 'Density decides how many clumps of the preset show, each one whole.' : 'Density is how full the middle of the brush gets on the first pass.' }} Falloff thins it out towards the edge of the brush. Go back over a spot without letting go to fill it in further.</p>
+							</template>
+							<template v-else>
+								<label>On a sample edge</label>
+								<img class="edge_noise_preview" v-if="sample_url" :src="sample_url">
+								<label>Selected texture with this brush <i class="material-icons edge_noise_refresh" title="Refresh" @click="refresh()">refresh</i></label>
+								<img class="edge_noise_preview" v-if="texture_url" :src="texture_url">
+								<p class="edge_noise_hint" v-else-if="texture_too_large">This texture is too large to preview.</p>
+								<p class="edge_noise_hint" v-else>Select a texture to preview it here.</p>
+							</template>
 						</template>
 					</div>
 				`
@@ -1420,6 +1528,14 @@
 	}
 
 	const css = `
+		.edge_noise_icon,
+		.edge_noise_panel i.material-icons,
+		body.edge_noise_brush_active [toolbar_item="brush_tool"] .icon:not(.action_more_options),
+		[menu_item="edge_noise_brush_settings"] > .icon,
+		.panel_handle[panel_id="edge_noise_brush"] .icon {
+			filter: drop-shadow(1px 0 0 ${OUTLINE_COLOR}) drop-shadow(-1px 0 0 ${OUTLINE_COLOR})
+				drop-shadow(0 1px 0 ${OUTLINE_COLOR}) drop-shadow(0 -1px 0 ${OUTLINE_COLOR});
+		}
 		.edge_noise_panel { padding: 4px 8px 8px; }
 		.edge_noise_bar { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 4px; }
 		.edge_noise_list { max-height: 180px; overflow-y: auto; margin-bottom: 6px; }
@@ -1487,7 +1603,7 @@
 				const entries = Object.keys(MODES).map(mode => ({
 					id: 'edge_noise_brush_' + mode,
 					name: MODES[mode].name,
-					icon: MODES[mode].icon,
+					icon: () => outlinedIcon(MODES[mode].icon),
 					click() {
 						tool.select();
 						setMode(mode);
@@ -1520,7 +1636,7 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.7.1',
+		version: '0.8.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
@@ -1551,6 +1667,7 @@
 			listeners.forEach(l => l && l.delete && l.delete());
 			listeners.length = 0;
 			unhookBrushTool();
+			document.body.classList.remove('edge_noise_brush_active');
 			if (panel) panel.delete();
 			if (settingsAction) settingsAction.delete();
 			if (styleNode && styleNode.delete) styleNode.delete();
