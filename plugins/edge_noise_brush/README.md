@@ -8,6 +8,7 @@ Four modes for the normal Brush tool. The Edge Noise Brush breaks up straight ed
 - By default only the selected paint colour grows, stepping outward into the neighbouring tone. Turn that off to push edges both ways.
 - Going back over a spot without letting go grows the brush colour another step.
 - The Highlight Brush and Shadow Brush draw a line of the brush colour along edges, following every step, with breaks and thickness from line presets. Each preset keeps its own thickness, distance from the edge, side and length.
+- A Texture Reference panel shows saved areas of your textures zoomed in, to pick colours from with a click while you paint.
 - The Noise Brush scatters the brush colour over any surface, densest in the middle of the brush, and fills in further as you scrub over it. Its specks are random or come from a noise preset, shown clump by clump.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/edge_noise_brush/about.html)

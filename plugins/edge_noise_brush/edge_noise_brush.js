@@ -41,7 +41,9 @@
 		noise_preset: '',     // noise preset name, '' = random noise
 		highlight_preset: '', // line preset names, '' = plain solid line
 		shadow_preset: '',
-		preset_options: {}    // 'kind/name' -> options for that preset
+		preset_options: {},   // 'kind/name' -> options for that preset
+		references: [],       // saved areas for the Texture Reference panel
+		reference_selected: '' // id of the reference shown, '' = the whole selected texture
 	};
 	const STORAGE_KEY = 'edge_noise_brush_settings';
 	const WEB_PRESETS_KEY = 'edge_noise_brush_presets';
@@ -1459,6 +1461,256 @@
 		refreshPanel();
 	}
 
+
+	/* --- texture reference panel --- */
+
+	let referencePanel;
+
+	/** The texture a reference points at, found by its id or, failing that, its name. */
+	function referenceTexture(ref) {
+		if (typeof Texture === 'undefined') return null;
+		if (!ref) return currentTexture();
+		return Texture.all.find(t => t.uuid === ref.texture_uuid) || Texture.all.find(t => t.name === ref.texture_name) || null;
+	}
+
+	function selectedReference() {
+		return settings.references.find(r => r.id === settings.reference_selected) || null;
+	}
+
+	function saveReferences() {
+		saveSettings();
+		if (referencePanel && referencePanel.vue) referencePanel.vue.sync();
+	}
+
+	/** Saves the area selected with the selection tool, or the whole texture, as a reference. */
+	function addReference() {
+		const texture = currentTexture();
+		if (!texture || !texture.canvas) {
+			Blockbench.showQuickMessage('Select a texture first');
+			return;
+		}
+		const rect = textureSelectionRect(texture) || { x: 0, y: 0, w: texture.canvas.width, h: texture.canvas.height };
+		const base = texture.name.replace(/\.png$/i, '') + ` ${rect.w}×${rect.h}`;
+		Blockbench.textPrompt('New reference', base, (name) => {
+			const ref = {
+				id: 'ref' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+				name: String(name || base).trim() || base,
+				texture_uuid: texture.uuid, texture_name: texture.name,
+				x: rect.x, y: rect.y, w: rect.w, h: rect.h
+			};
+			settings.references.push(ref);
+			settings.reference_selected = ref.id;
+			saveReferences();
+		});
+	}
+
+	function renameReference() {
+		const ref = selectedReference();
+		if (!ref) return;
+		Blockbench.textPrompt('Rename reference', ref.name, (name) => {
+			if (!String(name || '').trim()) return;
+			ref.name = String(name).trim();
+			saveReferences();
+		});
+	}
+
+	function deleteReference() {
+		const ref = selectedReference();
+		if (!ref) return;
+		settings.references = settings.references.filter(r => r !== ref);
+		settings.reference_selected = '';
+		saveReferences();
+	}
+
+	function pickReferenceColor(texture, x, y, secondary) {
+		if (!texture || !texture.canvas || typeof ColorPanel === 'undefined') return;
+		const c = texture.canvas;
+		if (x < 0 || y < 0 || x >= c.width || y >= c.height) return;
+		const d = c.getContext('2d').getImageData(x, y, 1, 1).data;
+		if (d[3] === 0) return;
+		const hex = '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
+		ColorPanel.set(hex, secondary);
+	}
+
+	function createReferencePanel() {
+		referencePanel = new Panel('edge_noise_reference', {
+			name: 'Texture Reference',
+			icon: 'center_focus_strong',
+			growable: true,
+			resizable: true,
+			default_side: 'right',
+			condition: () => Modes.paint,
+			default_position: {
+				slot: 'right_bar',
+				float_position: [0, 0],
+				float_size: [320, 360],
+				height: 360
+			},
+			component: {
+				data() {
+					return { refs: [], selected: '', hover: '', missing: false };
+				},
+				mounted() {
+					// the view: centre of the view in texture pixels, and screen pixels per texture pixel
+					this.view = null;
+					this.observer = new ResizeObserver(() => this.render());
+					this.observer.observe(this.$refs.box);
+					this.sync();
+				},
+				beforeDestroy() {
+					if (this.observer) this.observer.disconnect();
+				},
+				methods: {
+					sync() {
+						this.refs = settings.references.map(r => ({ id: r.id, name: r.name }));
+						this.selected = selectedReference() ? settings.reference_selected : '';
+						this.view = null;
+						this.render();
+					},
+					select(id) {
+						settings.reference_selected = id;
+						saveSettings();
+						this.sync();
+					},
+					addReference, renameReference, deleteReference,
+					area() {
+						const ref = selectedReference();
+						const texture = referenceTexture(ref);
+						if (!texture || !texture.canvas || !texture.canvas.width) return null;
+						const rect = ref ? ref : { x: 0, y: 0, w: texture.canvas.width, h: texture.canvas.height };
+						return { texture, rect };
+					},
+					resetView() {
+						const a = this.area();
+						const box = this.$refs.box;
+						if (!a || !box) return;
+						const W = box.clientWidth || 1, H = box.clientHeight || 1;
+						const zoom = Math.max(0.05, Math.min(W / a.rect.w, H / a.rect.h));
+						this.view = { cx: a.rect.x + a.rect.w / 2, cy: a.rect.y + a.rect.h / 2, zoom };
+						this.render();
+					},
+					render() {
+						const canvas = this.$refs.canvas, box = this.$refs.box;
+						if (!canvas || !box) return;
+						const W = Math.max(1, box.clientWidth), H = Math.max(1, box.clientHeight);
+						if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+						const ctx = canvas.getContext('2d');
+						ctx.setTransform(1, 0, 0, 1, 0, 0);
+						ctx.clearRect(0, 0, W, H);
+						const a = this.area();
+						this.missing = !a;
+						if (!a) return;
+						if (!this.view) { this.resetView(); return; }
+						const { cx, cy, zoom } = this.view;
+						ctx.imageSmoothingEnabled = false;
+						ctx.setTransform(zoom, 0, 0, zoom, W / 2 - cx * zoom, H / 2 - cy * zoom);
+						ctx.drawImage(a.texture.canvas, 0, 0);
+						ctx.setTransform(1, 0, 0, 1, 0, 0);
+						const toScreen = (x, y) => [W / 2 + (x - cx) * zoom, H / 2 + (y - cy) * zoom];
+						// pixel grid when zoomed in far enough
+						if (zoom >= 10) {
+							ctx.strokeStyle = 'rgba(128, 128, 128, 0.25)';
+							ctx.lineWidth = 1;
+							ctx.beginPath();
+							const x0 = Math.floor(cx - W / 2 / zoom), x1 = Math.ceil(cx + W / 2 / zoom);
+							const y0 = Math.floor(cy - H / 2 / zoom), y1 = Math.ceil(cy + H / 2 / zoom);
+							for (let x = x0; x <= x1; x++) { const [sx] = toScreen(x, 0); ctx.moveTo(Math.round(sx) + 0.5, 0); ctx.lineTo(Math.round(sx) + 0.5, H); }
+							for (let y = y0; y <= y1; y++) { const [, sy] = toScreen(0, y); ctx.moveTo(0, Math.round(sy) + 0.5); ctx.lineTo(W, Math.round(sy) + 0.5); }
+							ctx.stroke();
+						}
+						// the saved area, so it is easy to find again after panning
+						const [rx, ry] = toScreen(a.rect.x, a.rect.y);
+						ctx.strokeStyle = ICON_COLOR;
+						ctx.lineWidth = 1;
+						ctx.strokeRect(Math.round(rx) + 0.5, Math.round(ry) + 0.5, Math.round(a.rect.w * zoom), Math.round(a.rect.h * zoom));
+					},
+					texturePixel(event) {
+						const canvas = this.$refs.canvas;
+						if (!canvas || !this.view) return null;
+						const b = canvas.getBoundingClientRect();
+						const { cx, cy, zoom } = this.view;
+						return {
+							x: Math.floor(cx + (event.clientX - b.left - canvas.width / 2) / zoom),
+							y: Math.floor(cy + (event.clientY - b.top - canvas.height / 2) / zoom)
+						};
+					},
+					onWheel(event) {
+						if (!this.view) return;
+						const canvas = this.$refs.canvas, b = canvas.getBoundingClientRect();
+						const mx = event.clientX - b.left - canvas.width / 2, my = event.clientY - b.top - canvas.height / 2;
+						const v = this.view;
+						const zoom = Math.max(0.05, Math.min(256, v.zoom * (event.deltaY < 0 ? 1.25 : 0.8)));
+						// keep the pixel under the cursor in place
+						v.cx += mx / v.zoom - mx / zoom;
+						v.cy += my / v.zoom - my / zoom;
+						v.zoom = zoom;
+						this.render();
+					},
+					onMouseDown(event) {
+						const a = this.area();
+						if (!a || !this.view) return;
+						if (event.button === 2) {
+							const p = this.texturePixel(event);
+							if (p) pickReferenceColor(a.texture, p.x, p.y, true);
+							return;
+						}
+						const startX = event.clientX, startY = event.clientY;
+						const start = { cx: this.view.cx, cy: this.view.cy };
+						let dragged = event.button === 1;
+						const move = (e) => {
+							if (!dragged && Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+							dragged = true;
+							this.view.cx = start.cx - (e.clientX - startX) / this.view.zoom;
+							this.view.cy = start.cy - (e.clientY - startY) / this.view.zoom;
+							this.render();
+						};
+						const up = (e) => {
+							document.removeEventListener('mousemove', move);
+							document.removeEventListener('mouseup', up);
+							if (!dragged && event.button === 0) {
+								const p = this.texturePixel(e);
+								if (p) pickReferenceColor(a.texture, p.x, p.y, false);
+							}
+						};
+						document.addEventListener('mousemove', move);
+						document.addEventListener('mouseup', up);
+					},
+					onMouseMove(event) {
+						const a = this.area();
+						const p = a && this.texturePixel(event);
+						if (!p || p.x < 0 || p.y < 0 || p.x >= a.texture.canvas.width || p.y >= a.texture.canvas.height) { this.hover = ''; return; }
+						const d = a.texture.canvas.getContext('2d').getImageData(p.x, p.y, 1, 1).data;
+						const hex = '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
+						this.hover = `${p.x}, ${p.y}   ${d[3] ? hex : 'transparent'}`;
+					}
+				},
+				template: `
+					<div class="edge_noise_ref">
+						<div class="edge_noise_bar">
+							<div class="tool" title="New reference from the selected area of the texture (the whole texture if nothing is selected)" @click="addReference()"><i class="material-icons">add_photo_alternate</i></div>
+							<div class="tool" v-if="selected" title="Rename this reference" @click="renameReference()"><i class="material-icons">edit</i></div>
+							<div class="tool" v-if="selected" title="Delete this reference" @click="deleteReference()"><i class="material-icons">delete</i></div>
+							<div class="tool" title="Fit the view (or double-click the view)" @click="resetView()"><i class="material-icons">fit_screen</i></div>
+						</div>
+						<div class="edge_noise_ref_tabs">
+							<div :class="{selected: selected === ''}" @click="select('')">Whole texture</div>
+							<div v-for="r in refs" :key="r.id" :class="{selected: selected === r.id}" @click="select(r.id)" :title="r.name">{{ r.name }}</div>
+						</div>
+						<div class="edge_noise_ref_view" ref="box">
+							<canvas ref="canvas" @wheel.prevent="onWheel" @mousedown="onMouseDown" @mousemove="onMouseMove" @mouseleave="hover = ''" @dblclick="resetView()" @contextmenu.prevent></canvas>
+							<p class="edge_noise_hint" v-if="missing">The texture of this reference is not open.</p>
+						</div>
+						<div class="edge_noise_ref_status">{{ hover || 'Click: pick colour   Right-click: secondary   Drag: move   Scroll: zoom' }}</div>
+					</div>
+				`
+			}
+		});
+	}
+
+	function refreshReference() {
+		if (referencePanel && referencePanel.vue) referencePanel.vue.render();
+	}
+
 	function createPanel() {
 		panel = new Panel('edge_noise_brush', {
 			name: 'Edge Noise Brush',
@@ -1659,6 +1911,18 @@
 	}
 
 	const css = `
+		.edge_noise_ref { display: flex; flex-direction: column; height: 100%; padding: 4px 8px 8px; box-sizing: border-box; }
+		.edge_noise_ref_tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+		.edge_noise_ref_tabs > div { padding: 1px 8px; border-radius: 10px; background-color: var(--color-button); cursor: pointer;
+			max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.edge_noise_ref_tabs > div.selected { background-color: var(--color-selected); }
+		.edge_noise_ref_view { position: relative; flex: 1; min-height: 160px; overflow: hidden;
+			background: repeating-conic-gradient(#8883 0% 25%, transparent 0% 50%) 50% / 16px 16px; }
+		.edge_noise_ref_view canvas { position: absolute; inset: 0; cursor: crosshair; }
+		.edge_noise_ref_view .edge_noise_hint { position: absolute; inset: 0; margin: auto; height: fit-content; text-align: center; }
+		.edge_noise_ref_status { color: var(--color-subtle_text); font-size: 0.85em; margin-top: 4px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+		.edge_noise_ref i.material-icons,
+		.panel_handle[panel_id="edge_noise_reference"] .icon { color: ${ICON_COLOR} !important; }
 		.edge_noise_icon,
 		.edge_noise_panel i.material-icons,
 		body.edge_noise_brush_active [toolbar_item="brush_tool"] .icon:not(.action_more_options),
@@ -1769,13 +2033,14 @@
 		author: 'Shapescape',
 		description: 'Brush modes for pixel art edges: break edges into steps, add highlight and shadow lines along them, and scatter noise, all following your own presets.',
 		icon: 'grain',
-		version: '0.9.1',
+		version: '0.10.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
 			styleNode = Blockbench.addCSS(css);
 			hookBrushTool();
 			createPanel();
+			createReferencePanel();
 
 			settingsAction = new Action('edge_noise_brush_settings', {
 				name: 'Edge Noise Brush Settings',
@@ -1788,6 +2053,10 @@
 			const refreshIfActive = () => { if (activeMode) refreshPanel(400); };
 			for (const event of ['update_texture_selection', 'finished_edit', 'change_color', 'select_mode']) {
 				listeners.push(Blockbench.on(event, refreshIfActive));
+			}
+			// the reference view follows edits and the selected texture
+			for (const event of ['update_texture_selection', 'finished_edit', 'undo', 'redo', 'select_project']) {
+				listeners.push(Blockbench.on(event, refreshReference));
 			}
 			// safety net: a new stroke always gets a fresh snapshot
 			document.addEventListener('pointerup', clearCache, true);
@@ -1802,6 +2071,7 @@
 			unhookBrushTool();
 			document.body.classList.remove('edge_noise_brush_active');
 			if (panel) panel.delete();
+			if (referencePanel) referencePanel.delete();
 			if (settingsAction) settingsAction.delete();
 			if (styleNode && styleNode.delete) styleNode.delete();
 		}

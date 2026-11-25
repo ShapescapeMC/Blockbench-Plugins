@@ -146,3 +146,16 @@ Each line preset, and the plain line, keeps its own options in the panel:
 Lines drawn earlier are taken into account. A highlight counts as part of the brighter side of its edge and a shadow as part of the darker side, so a shadow brushed over a highlight lands right under it rather than around it, and brushing over a line again leaves it as it is. This works for lines up to 8 pixels thick that are brighter or darker than both tones they sit between.
 
 The `Horizontal edges`, `Vertical edges` and `Edge threshold` settings apply to these brushes too. `Follow stroke direction` does not: the line always follows both the flat runs and the steps of an edge, so it stays joined up.
+
+## Texture Reference panel
+
+The Texture Reference panel is a second, zoomed view of your texture to pick colours from while you paint. It shows in the Paint tab whichever brush you use, and like any panel it can be moved, docked on either side, or floated.
+
+- `Whole texture` shows the selected texture.
+- To save a part of a texture as a reference, select it with the selection tool in the UV editor and click the add button in the panel. With nothing selected, the whole texture is saved. References are listed along the top of the panel; click one to show it.
+- Click a pixel to pick its colour as the brush colour, and right-click to pick it as the secondary colour. Transparent pixels are skipped.
+- Scroll to zoom in and out around the cursor, drag to move around, and double-click or use the fit button to go back to the saved area. The saved area is outlined so you can find it again, and a pixel grid shows when zoomed in far.
+- The line at the bottom shows the position and colour of the pixel under the cursor.
+- The view updates after every stroke, so it always shows the texture as it is now.
+
+References are remembered between sessions. A reference keeps working while its texture is open in a project; otherwise the panel says so.
