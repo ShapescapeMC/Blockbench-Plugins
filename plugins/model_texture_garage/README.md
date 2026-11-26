@@ -12,7 +12,8 @@ Tools for pixel art models built from blocks, in one plugin.
 
 **Modelling**, in the Edit tab:
 
-- **Block Grid Cube** tool: click a face to add a cube on the block grid, or to cut one out, at 4 to 64 units. New cubes are named `ADD` or `CUTOUT` for a build script.
+- **Block Grid Cube** tool: click a face to add a cube on the block grid, cut one out or mark one hollow, at 4 to 64 units. New cubes are named `ADD`, `CUTOUT` or `HOLLOW`.
+- **BlockPatcher**: turns those cubes into real geometry, merges cubes, drops hidden faces and lays out the UV again, in a preview tab where you mark and restore what went wrong before confirming.
 
 Presets can be sorted into folders, each with its own options, and live in their own folder in Blockbench's user data folder.
 

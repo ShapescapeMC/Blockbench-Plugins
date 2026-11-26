@@ -1,5 +1,5 @@
 # Model & Texture Garage
-This plugin gathers tools for pixel art models built from blocks: brushes for edges, highlights, shadows, noise and block cells, a reference panel to pick colours from, and a tool to add and cut out cubes on the block grid.
+This plugin gathers tools for pixel art models built from blocks: brushes for edges, highlights, shadows, noise and block cells, a reference panel to pick colours from, a tool to add and cut out cubes on the block grid, and BlockPatcher to turn those into real geometry.
 
 ## Texturing
 
@@ -14,4 +14,6 @@ Every preset keeps its own options, such as thickness, depth or scale, and prese
 
 ## Modelling
 
-The **Block Grid Cube** tool adds a cube against the face you click, or cuts one out of it, always on the model's block grid at 4 to 64 units. New cubes are named in capitals after what they do, `ADD` or `CUTOUT`, so a build script can find them.
+The **Block Grid Cube** tool adds a cube against the face you click, or cuts one out of it, always on the model's block grid at 4 to 64 units. New cubes are named in capitals after what they do, `ADD`, `CUTOUT` or `HOLLOW`.
+
+**BlockPatcher** applies those cubes: it carves the cut-outs, joins the added cubes to the model, makes hollows see-through, merges cubes, drops faces nobody can see and lays out the UV again. The result opens in a preview tab, where you can mark parts that went wrong and restore them before confirming.

@@ -225,7 +225,7 @@ The mode and the standard sizes are also in the tool bar at the top, and the nam
 - `Cut out`: the new cube goes just inside the face you point at: its outer side is flush with that face, even where the face is not on a block edge, and it reaches the cube size inwards. Along the face it stays on the block grid. It is inflated so it sits slightly proud of the surface, where you can see it. Named `CUTOUT`.
 - `Hollow`: placed like Cut out, flush with the face you point at and inflated, but named `HOLLOW`, for a build script that hollows that part out rather than removing it.
 
-The cut and the hollowing themselves are left to your build script.
+BlockPatcher (below) turns these cubes into real geometry. A build script of your own can also look for them by name.
 
 ### Cube size and grid
 
@@ -236,9 +236,52 @@ Pick another `Grid` to snap to a different step. Across the face, the cube is ce
 ### The new cubes
 
 - They go into the same bone as the cube you clicked, with the same pivot, so they move with it.
-- Every face gets the texture of the face you clicked, and the UV is laid out automatically, ready for a script to remap it.
+- Every face gets the texture of the face you clicked, and the UV is laid out automatically. BlockPatcher repaints and remaps it.
 - Clicking a spot that already has a cube of the same name and size does nothing.
 
 ```{note}
 If the toolbox shows the Block Grid Cube tool more than once, another copy of it is installed, such as the separate Block Grid Modeler plugin from before the two were combined. Uninstall that one. Model & Texture Garage also tidies up leftover toolbox entries when it loads, so after a restart there is one again.
 ```
+
+## BlockPatcher
+
+BlockPatcher does what the `ADD`, `CUTOUT` and `HOLLOW` cubes ask for, and tidies the model up. Run it with the `BlockPatcher` button in the Block Grid Cube panel, or `Tools -> BlockPatcher`.
+
+Your model is not changed yet. The result opens in a new tab, `<model> · BlockPatcher`, with the BlockPatcher panel on the right. Look it over, fix what went wrong, then press `Confirm`: the tab closes and your model gets the result, as one undo step. `Cancel`, or closing the tab, leaves your model as it was.
+
+### What it does
+
+1. `ADD` cubes become part of the cube they sit against: same bone, same name, and painted with that cube's pattern so it carries on across the join. Any part of an `ADD` cube that is already inside the model is dropped.
+2. `CUTOUT` cubes carve real empty space. The cubes they cut into are rebuilt around the hole from as few cubes as possible, keeping every pixel of their texture where it was. The new walls inside the hole get the pattern of the surface, darkened by `Wall shade`.
+3. `HOLLOW` cubes make a see-through pocket without extra geometry. The faces of the cube they sit in turn transparent where the hollow is. The hollow cube itself is kept, renamed `HOLLOW into <cube>`, and painted like its surroundings (darkened by `Wall shade`). Its sides that lie on the outside of the model are removed, so you look into it, while the sides inside the model become its walls. Hollows made earlier (any cube whose name starts with `HOLLOW` followed by more words) are left alone, so running BlockPatcher again doesn't redo them.
+4. Exact duplicate cubes are removed. Cubes in the same bone that together form one box are merged into one cube.
+5. Faces nobody can see are dropped: faces fully covered by touching cubes, or inside another cube. Faces next to see-through texture are kept.
+6. The UV is laid out again. `repack everything by group` packs every face into a new, tighter texture, bone by bone, with each cube's faces side by side like box UV. `keep untouched UVs` leaves every face that didn't change exactly where it was and adds the new ones below the old texture.
+
+Cubes in a rotated bone, or rotated themselves, only work with cubes turned the same way. Cubes with `inflate` are left as they are.
+
+### Fixing what went wrong
+
+- Pick the `BlockPatcher Marker` (the button in the panel, or the toolbox) and click parts of the preview that came out wrong. They get a red outline. Click again to unmark.
+- `Restore` puts the marked parts back the way they were before BlockPatcher: the `ADD`, `CUTOUT` or `HOLLOW` cubes that made them are skipped and stay in the model as they are, and the cubes they touched are kept unchanged. With nothing marked, it restores the selected cubes.
+- Deleting a part of the preview that BlockPatcher changed restores it too.
+- The `Patch cubes` list shows every `ADD`, `CUTOUT` and `HOLLOW` cube, which cube it works on, and `no effect` when it touches nothing. Untick one to skip it, tick it again to bring it back. Click its name to select what it made.
+- `Undo all restores` brings back everything you restored.
+
+Restoring and changing settings rebuild the preview from your model, so changes made by hand in the preview are lost then (BlockPatcher asks first). Hand edits made after the last rebuild are kept when you confirm.
+
+### Settings
+
+- `Wall shade`: how bright new inner walls are, compared with the surface they are cut into.
+- `Merge`: merge all cubes that form one box, only around patches, or not at all.
+- `UV`: repack everything, or keep untouched UVs (see above).
+- `Padding`: pixels between packed faces.
+- `Drop faces nobody can see`: on by default.
+- `Paint ADD cubes like what they attach to`: on by default; off keeps the ADD cube's own texture.
+
+The names BlockPatcher looks for are the ones set in the Block Grid Cube panel.
+
+```{note}
+Repacking moves pixels in the texture. Anything else laid out on the same UV, such as a height map or a normal map painted to match the texture, does not move with it. Use `keep untouched UVs` for models like that, or redo those maps afterwards.
+```
+

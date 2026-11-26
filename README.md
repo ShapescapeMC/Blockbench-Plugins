@@ -11,7 +11,7 @@ This plugin renders the model you have open into finished images and GIFs: still
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/render_model/about.html)
 
 ### Model & Texture Garage
-This plugin gathers tools for pixel art models built from blocks. Brushes break edges into steps, draw highlights and shadows along them, scatter noise and fill block cells, all following presets you make from your own textures, and a reference panel lets you pick colours from a zoomed view. In the Edit tab, a Block Grid Cube tool adds and cuts out cubes on the model's block grid, named for your build script.
+This plugin gathers tools for pixel art models built from blocks. Brushes break edges into steps, draw highlights and shadows along them, scatter noise and fill block cells, all following presets you make from your own textures, and a reference panel lets you pick colours from a zoomed view. In the Edit tab, a Block Grid Cube tool adds and cuts out cubes on the model's block grid, and BlockPatcher turns them into real geometry, merges cubes and lays out the UV again, in a preview you confirm.
 
 [Learn More](https://blockbench-plugins.readthedocs.io/en/latest/model_texture_garage/about.html)
 

@@ -15,7 +15,10 @@
  *
  * Modelling, in the Edit tab:
  * - Block Grid Cube tool: click a face to add a cube on the block grid, or
- *   to cut one out, named ADD or CUTOUT for a build script.
+ *   to cut one out or mark one hollow, named ADD, CUTOUT or HOLLOW.
+ * - BlockPatcher: turns those cubes into real geometry (cuts, added cubes,
+ *   see-through hollows), merges cubes, drops hidden faces and lays out the
+ *   UV, in a preview tab where you can restore what went wrong, then confirm.
  *
  * Alt picks a colour with every brush, as with the normal brush. Presets
  * live in the "edge_noise_presets" folder in Blockbench's user data folder.
@@ -3165,6 +3168,9 @@
 							settings.drag_draw = !!value;
 							saveSettings();
 							syncPanel();
+						},
+						patch() {
+							if (typeof BarItems !== 'undefined' && BarItems.block_patcher) BarItems.block_patcher.trigger();
 						}
 					},
 					template: `
@@ -3208,6 +3214,12 @@
 							<div class="bgc_row" title="Hold the mouse and drag across faces to place a line of cubes on the same layer as the first one.">
 								<input type="checkbox" :checked="drag_draw" @change="setDrag($event.target.checked)">
 								<span>Hold to draw a line of cubes</span>
+							</div>
+							<label>Apply <span class="bgc_subtle">turn the cubes above into real geometry</span></label>
+							<div class="bgc_buttons">
+								<div class="bgc_button" @click="patch()" title="Apply ADD, CUTOUT and HOLLOW cubes, merge cubes and lay out the UV, in a preview tab you confirm">
+									<i class="material-icons" style="color:#d7263d">auto_fix_high</i><span>BlockPatcher</span>
+								</div>
 							</div>
 						</div>
 					`
@@ -3360,6 +3372,1377 @@
 		});
 	})();
 
+	/* ======================= BlockPatcher ======================= */
+	(function () {
+		'use strict';
+
+		/* --- BlockPatcher core ---
+		 * Works on plain data, so it runs (and is tested) outside Blockbench:
+		 *   model   a .bbmodel object (elements with face texture indexes, groups, outliner, resolution)
+		 *   images  one { w, h, data: RGBA } per texture index
+		 * and returns the patched model and images plus what happened. Nothing here touches Blockbench.
+		 */
+		const BP_DEFAULTS = {
+			add_name: 'ADD',
+			cutout_name: 'CUTOUT',
+			hollow_name: 'HOLLOW',
+			wall_shade: 70,          // % brightness of new inner walls (cutout sides, hollow walls)
+			retexture_add: true,     // paint ADD cubes with the pattern of the cube they attach to
+			merge: 'all',            // 'all' | 'patched' (only merge where a patch changed something) | 'off'
+			cull_hidden: true,       // drop faces that are fully covered by touching cubes
+			uv_mode: 'all',          // 'all' repack everything by group | 'changed' keep untouched faces where they are
+			padding: 0,              // pixels between packed faces
+		};
+
+		const BP_FACES = ['east', 'north', 'west', 'south', 'up', 'down'];
+		// outward side of each face: [model axis, sign]
+		const BP_DIRS = { north: [2, -1], south: [2, 1], west: [0, -1], east: [0, 1], down: [1, -1], up: [1, 1] };
+		const BP_OPPOSITE = { north: 'south', south: 'north', west: 'east', east: 'west', up: 'down', down: 'up' };
+		// texture u / v of each face: [model axis, end of the cube the UV starts at, direction]
+		// (the same table as Blockbench's automatic UV, see FACE_AXES above)
+		const BP_AXES = {
+			north: { u: [0, 'to', -1], v: [1, 'to', -1] },
+			south: { u: [0, 'from', 1], v: [1, 'to', -1] },
+			west: { u: [2, 'from', 1], v: [1, 'to', -1] },
+			east: { u: [2, 'to', -1], v: [1, 'to', -1] },
+			up: { u: [0, 'from', 1], v: [2, 'from', 1] },
+			down: { u: [0, 'from', 1], v: [2, 'to', -1] }
+		};
+		const EPS = 1e-6;
+
+		function bpUuid() {
+			if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+			return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+				const r = Math.random() * 16 | 0;
+				return (c === 'x' ? r : (r & 3 | 8)).toString(16);
+			});
+		}
+
+		/* --- images --- */
+		function newImage(w, h) { return { w, h, data: new Uint8ClampedArray(w * h * 4) }; }
+		function cropImage(img, x0, y0, w, h) {
+			const out = newImage(w, h);
+			for (let y = 0; y < h; y++) {
+				const sy = Math.min(img.h - 1, Math.max(0, y0 + y));
+				for (let x = 0; x < w; x++) {
+					const sx = Math.min(img.w - 1, Math.max(0, x0 + x));
+					const s = (sy * img.w + sx) * 4, d = (y * w + x) * 4;
+					out.data[d] = img.data[s]; out.data[d + 1] = img.data[s + 1]; out.data[d + 2] = img.data[s + 2]; out.data[d + 3] = img.data[s + 3];
+				}
+			}
+			return out;
+		}
+		function blit(dst, src, dx, dy) {
+			for (let y = 0; y < src.h; y++) {
+				const ty = dy + y;
+				if (ty < 0 || ty >= dst.h) continue;
+				for (let x = 0; x < src.w; x++) {
+					const tx = dx + x;
+					if (tx < 0 || tx >= dst.w) continue;
+					const s = (y * src.w + x) * 4, d = (ty * dst.w + tx) * 4;
+					dst.data[d] = src.data[s]; dst.data[d + 1] = src.data[s + 1]; dst.data[d + 2] = src.data[s + 2]; dst.data[d + 3] = src.data[s + 3];
+				}
+			}
+		}
+		function imageKey(img) {
+			// cheap content hash, used to tell whether a face's pixels changed
+			let h = 2166136261 >>> 0;
+			for (let i = 0; i < img.data.length; i += 1) { h ^= img.data[i]; h = Math.imul(h, 16777619) >>> 0; }
+			return img.w + 'x' + img.h + ':' + h;
+		}
+
+		/* --- boxes --- */
+		function ext(b, a) { return b.to[a] - b.from[a]; }
+		function overlapsVolume(a, b) {
+			for (let i = 0; i < 3; i++) if (Math.min(a.to[i], b.to[i]) - Math.max(a.from[i], b.from[i]) <= EPS) return false;
+			return true;
+		}
+		function overlapVolume(a, b) {
+			let v = 1;
+			for (let i = 0; i < 3; i++) v *= Math.max(0, Math.min(a.to[i], b.to[i]) - Math.max(a.from[i], b.from[i]));
+			return v;
+		}
+		/** Area where two boxes touch face to face (0 if they don't). */
+		function contactArea(a, b) {
+			for (let k = 0; k < 3; k++) {
+				if (Math.abs(a.to[k] - b.from[k]) < EPS || Math.abs(b.to[k] - a.from[k]) < EPS) {
+					let area = 1;
+					for (let i = 0; i < 3; i++) {
+						if (i === k) continue;
+						area *= Math.max(0, Math.min(a.to[i], b.to[i]) - Math.max(a.from[i], b.from[i]));
+					}
+					if (area > EPS) return area;
+				}
+			}
+			return 0;
+		}
+		/** a minus c, as up to six boxes that fill a without c. */
+		function subtractBox(a, c) {
+			if (!overlapsVolume(a, c)) return [{ from: a.from.slice(), to: a.to.slice() }];
+			const out = [];
+			const cur = { from: a.from.slice(), to: a.to.slice() };
+			for (const ax of [1, 0, 2]) {
+				if (c.from[ax] > cur.from[ax] + EPS) {
+					const p = { from: cur.from.slice(), to: cur.to.slice() };
+					p.to[ax] = c.from[ax]; out.push(p); cur.from[ax] = c.from[ax];
+				}
+				if (c.to[ax] < cur.to[ax] - EPS) {
+					const p = { from: cur.from.slice(), to: cur.to.slice() };
+					p.from[ax] = c.to[ax]; out.push(p); cur.to[ax] = c.to[ax];
+				}
+			}
+			return out;
+		}
+		function facePlane(b, d) { const [a, s] = BP_DIRS[d]; return s > 0 ? b.to[a] : b.from[a]; }
+		/** The face's rectangle on its plane: [[u0,u1],[v0,v1]] in model units along the face's u/v model axes. */
+		function faceRect(b, d) {
+			const ax = BP_AXES[d];
+			return [[b.from[ax.u[0]], b.to[ax.u[0]]], [b.from[ax.v[0]], b.to[ax.v[0]]]];
+		}
+		function rectIntersect(r, s) {
+			const u0 = Math.max(r[0][0], s[0][0]), u1 = Math.min(r[0][1], s[0][1]);
+			const v0 = Math.max(r[1][0], s[1][0]), v1 = Math.min(r[1][1], s[1][1]);
+			if (u1 - u0 <= EPS || v1 - v0 <= EPS) return null;
+			return [[u0, u1], [v0, v1]];
+		}
+		/** Does the union of rects cover r completely? */
+		function rectsCover(r, rects) {
+			if (!rects.length) return false;
+			const us = new Set([r[0][0], r[0][1]]), vs = new Set([r[1][0], r[1][1]]);
+			for (const s of rects) { us.add(s[0][0]); us.add(s[0][1]); vs.add(s[1][0]); vs.add(s[1][1]); }
+			const U = [...us].filter(x => x >= r[0][0] - EPS && x <= r[0][1] + EPS).sort((a, b) => a - b);
+			const V = [...vs].filter(x => x >= r[1][0] - EPS && x <= r[1][1] + EPS).sort((a, b) => a - b);
+			for (let i = 0; i + 1 < U.length; i++) {
+				if (U[i + 1] - U[i] <= EPS) continue;
+				const cu = (U[i] + U[i + 1]) / 2;
+				for (let j = 0; j + 1 < V.length; j++) {
+					if (V[j + 1] - V[j] <= EPS) continue;
+					const cv = (V[j] + V[j + 1]) / 2;
+					if (!rects.some(s => cu > s[0][0] && cu < s[0][1] && cv > s[1][0] && cv < s[1][1])) return false;
+				}
+			}
+			return true;
+		}
+		/**
+		 * Pixel range of the model range [p0, p1] along one face axis of box b,
+		 * for a face image with ppu pixels per model unit.
+		 */
+		function pxRange(b, info, p0, p1, ppu) {
+			const [a, end, dir] = info;
+			const start = b[end][a];
+			const x0 = dir * (p0 - start) * ppu, x1 = dir * (p1 - start) * ppu;
+			return [Math.round(Math.min(x0, x1)), Math.round(Math.max(x0, x1))];
+		}
+
+		/**
+		 * Skyline packing: items (with w, h, group) in their order, groups kept in sequence,
+		 * tallest first inside a group. Writes _x/_y on each item, returns the used height.
+		 */
+		function skyline(items, width, top, pad) {
+			let sky = [{ x: 0, y: top, w: width }];
+			let height = top;
+			const groups = [];
+			for (const it of items) {
+				if (!groups.length || groups[groups.length - 1].group !== it.group) groups.push({ group: it.group, items: [] });
+				groups[groups.length - 1].items.push(it);
+			}
+			for (const g of groups) {
+				g.items.sort((a, b) => (b.h - a.h) || (b.w - a.w));
+				for (const it of g.items) {
+					const w = it.w + pad, h = it.h + pad;
+					let best = null;
+					for (let i = 0; i < sky.length; i++) {
+						if (sky[i].x + w > width + pad) break;
+						// highest skyline under [x, x + w)
+						let y = 0, rest = w, j = i;
+						while (rest > 0 && j < sky.length) { y = Math.max(y, sky[j].y); rest -= sky[j].w; j++; }
+						if (rest > 0) continue;
+						if (!best || y + h < best.y + best.h || (y + h === best.y + best.h && sky[i].x < best.x)) best = { i, x: sky[i].x, y, h };
+					}
+					if (!best) best = { i: 0, x: 0, y: Math.max(...sky.map(s => s.y)), h };
+					it._x = best.x; it._y = best.y;
+					height = Math.max(height, best.y + it.h);
+					// raise the skyline under the new item
+					const nx = best.x, nw = w, ny = best.y + h;
+					const next = [];
+					for (const seg of sky) {
+						const s0 = seg.x, s1 = seg.x + seg.w;
+						if (s1 <= nx || s0 >= nx + nw) { next.push(seg); continue; }
+						if (s0 < nx) next.push({ x: s0, y: seg.y, w: nx - s0 });
+						if (s1 > nx + nw) next.push({ x: nx + nw, y: seg.y, w: s1 - nx - nw });
+					}
+					next.push({ x: nx, y: ny, w: nw });
+					next.sort((a, b) => a.x - b.x);
+					sky = [];
+					for (const seg of next) {
+						const last = sky[sky.length - 1];
+						if (last && last.y === seg.y && last.x + last.w === seg.x) last.w += seg.w; else sky.push(seg);
+					}
+				}
+			}
+			return { height };
+		}
+
+		/* --- faces ---
+		 * A face is { img, tex, ppu: [u, v], orig } where img runs along the face's u/v axes from the
+		 * corner BP_AXES names, ppu is pixels per model unit, and orig (only on untouched faces) is the
+		 * original face JSON so it can stay where it was in the texture.
+		 */
+		function faceCorners(face) {
+			const uv = face.uv;
+			let c = [[uv[0], uv[1]], [uv[2], uv[1]], [uv[0], uv[3]], [uv[2], uv[3]]];
+			let r = ((face.rotation || 0) % 360 + 360) % 360;
+			while (r > 0) { c = [c[2], c[0], c[3], c[1]]; r -= 90; }
+			return c;
+		}
+		function readFace(box, d, faceJson, images, scale) {
+			const img = images[faceJson.texture];
+			if (!img) return null;
+			const [fx, fy] = scale(faceJson.texture);
+			const c = faceCorners(faceJson);
+			const du = [(c[1][0] - c[0][0]) * fx, (c[1][1] - c[0][1]) * fy];
+			const dv = [(c[2][0] - c[0][0]) * fx, (c[2][1] - c[0][1]) * fy];
+			const ax = BP_AXES[d];
+			const eu = ext(box, ax.u[0]), ev = ext(box, ax.v[0]);
+			let w = Math.round(Math.abs(du[0]) + Math.abs(du[1]));
+			let h = Math.round(Math.abs(dv[0]) + Math.abs(dv[1]));
+			if (w < 1) w = Math.max(1, Math.round(eu));
+			if (h < 1) h = Math.max(1, Math.round(ev));
+			const out = newImage(w, h);
+			const ox = c[0][0] * fx, oy = c[0][1] * fy;
+			for (let j = 0; j < h; j++) {
+				for (let i = 0; i < w; i++) {
+					const s = (i + 0.5) / w, t = (j + 0.5) / h;
+					let x = Math.floor(ox + s * du[0] + t * dv[0]);
+					let y = Math.floor(oy + s * du[1] + t * dv[1]);
+					x = Math.min(img.w - 1, Math.max(0, x)); y = Math.min(img.h - 1, Math.max(0, y));
+					const si = (y * img.w + x) * 4, di = (j * w + i) * 4;
+					out.data[di] = img.data[si]; out.data[di + 1] = img.data[si + 1]; out.data[di + 2] = img.data[si + 2]; out.data[di + 3] = img.data[si + 3];
+				}
+			}
+			return { img: out, tex: faceJson.texture, ppu: [eu > EPS ? w / eu : w, ev > EPS ? h / ev : h], orig: faceJson };
+		}
+		/** The part of face d of box b that piece p (inside b, sharing that face's plane) covers. */
+		function cropFace(face, b, p, d) {
+			const ax = BP_AXES[d];
+			const [x0, x1] = pxRange(b, ax.u, p.from[ax.u[0]], p.to[ax.u[0]], face.ppu[0]);
+			const [y0, y1] = pxRange(b, ax.v, p.from[ax.v[0]], p.to[ax.v[0]], face.ppu[1]);
+			return { img: cropImage(face.img, x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)), tex: face.tex, ppu: face.ppu.slice() };
+		}
+		/**
+		 * A new face d for box b, painted with the pattern of face srcDir of box src, lined up in
+		 * model space so it continues seamlessly, and darkened by shade (1 = as is).
+		 */
+		function patternFace(b, d, src, srcDir, shade) {
+			const f = src.faces[srcDir];
+			if (!f) return null;
+			const ax = BP_AXES[d];
+			const w = Math.max(1, Math.round(ext(b, ax.u[0]) * f.ppu[0]));
+			const h = Math.max(1, Math.round(ext(b, ax.v[0]) * f.ppu[1]));
+			const out = newImage(w, h);
+			let offX = 0, offY = 0;
+			if (srcDir === d) {
+				offX = Math.round(ax.u[2] * (b[ax.u[1]][ax.u[0]] - src[ax.u[1]][ax.u[0]]) * f.ppu[0]);
+				offY = Math.round(ax.v[2] * (b[ax.v[1]][ax.v[0]] - src[ax.v[1]][ax.v[0]]) * f.ppu[1]);
+			}
+			// sample only opaque pixels of the source, so holes in it don't turn into holes here
+			const sw = f.img.w, sh = f.img.h, sd = f.img.data;
+			let fallback = null;
+			for (let j = 0; j < h; j++) {
+				for (let i = 0; i < w; i++) {
+					let sx = ((i + offX) % sw + sw) % sw, sy = ((j + offY) % sh + sh) % sh;
+					let si = (sy * sw + sx) * 4;
+					if (sd[si + 3] < 255) {
+						if (!fallback) fallback = averageColor(f.img);
+						const di = (j * w + i) * 4;
+						out.data[di] = fallback[0] * shade; out.data[di + 1] = fallback[1] * shade; out.data[di + 2] = fallback[2] * shade; out.data[di + 3] = 255;
+						continue;
+					}
+					const di = (j * w + i) * 4;
+					out.data[di] = sd[si] * shade; out.data[di + 1] = sd[si + 1] * shade; out.data[di + 2] = sd[si + 2] * shade; out.data[di + 3] = 255;
+				}
+			}
+			return { img: out, tex: f.tex, ppu: f.ppu.slice() };
+		}
+		function averageColor(img) {
+			let r = 0, g = 0, b = 0, n = 0;
+			for (let i = 0; i < img.data.length; i += 4) {
+				if (img.data[i + 3] < 128) continue;
+				r += img.data[i]; g += img.data[i + 1]; b += img.data[i + 2]; n++;
+			}
+			return n ? [r / n, g / n, b / n] : [128, 128, 128];
+		}
+		/** Any face of box b to take a pattern from, preferring direction d. */
+		function patternSource(b, d) {
+			if (b.faces[d]) return d;
+			let best = null, area = -1;
+			for (const k of BP_FACES) {
+				const f = b.faces[k];
+				if (f && f.img.w * f.img.h > area) { best = k; area = f.img.w * f.img.h; }
+			}
+			return best;
+		}
+		function clearRect(face, b, d, rect) {
+			const ax = BP_AXES[d];
+			const [x0, x1] = pxRange(b, ax.u, rect[0][0], rect[0][1], face.ppu[0]);
+			const [y0, y1] = pxRange(b, ax.v, rect[1][0], rect[1][1], face.ppu[1]);
+			let changed = false;
+			for (let y = Math.max(0, y0); y < Math.min(face.img.h, y1); y++) {
+				for (let x = Math.max(0, x0); x < Math.min(face.img.w, x1); x++) {
+					const i = (y * face.img.w + x) * 4 + 3;
+					if (face.img.data[i] !== 0) { face.img.data[i] = 0; changed = true; }
+				}
+			}
+			return changed;
+		}
+		function opaqueIn(face, b, d, rect) {
+			const ax = BP_AXES[d];
+			const [x0, x1] = pxRange(b, ax.u, rect[0][0], rect[0][1], face.ppu[0]);
+			const [y0, y1] = pxRange(b, ax.v, rect[1][0], rect[1][1], face.ppu[1]);
+			for (let y = Math.max(0, y0); y < Math.min(face.img.h, y1); y++) {
+				for (let x = Math.max(0, x0); x < Math.min(face.img.w, x1); x++) {
+					if (face.img.data[(y * face.img.w + x) * 4 + 3] < 255) return false;
+				}
+			}
+			return true;
+		}
+		function opaqueFace(face) {
+			for (let i = 3; i < face.img.data.length; i += 4) if (face.img.data[i] < 255) return false;
+			return true;
+		}
+		function emptyFace(face) {
+			for (let i = 3; i < face.img.data.length; i += 4) if (face.img.data[i] !== 0) return false;
+			return true;
+		}
+
+		/* --- the model --- */
+		function patchKind(name, s) {
+			const n = String(name || '').trim();
+			const test = base => base && new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:[\\s._-]*\\d+)?$').test(n);
+			if (test(s.add_name)) return 'add';
+			if (test(s.cutout_name)) return 'cutout';
+			if (test(s.hollow_name)) return 'hollow';
+			return null;
+		}
+		function isZero(v) { return !v || (Math.abs(v[0] || 0) < EPS && Math.abs(v[1] || 0) < EPS && Math.abs(v[2] || 0) < EPS); }
+
+		/** Parent group uuid of every node, and every group in outliner order. */
+		function walkOutliner(outliner) {
+			const parent = {}, groupOrder = [], nodeOrder = [];
+			(function walk(list, p) {
+				for (const item of list || []) {
+					if (typeof item === 'string') { parent[item] = p; nodeOrder.push(item); }
+					else if (item && item.uuid) {
+						parent[item.uuid] = p; groupOrder.push(item.uuid); nodeOrder.push(item.uuid);
+						walk(item.children || item.content, item.uuid);
+					}
+				}
+			})(outliner, null);
+			return { parent, groupOrder, nodeOrder };
+		}
+
+		/**
+		 * Run BlockPatcher.
+		 * opts: settings (BP_DEFAULTS), excluded: Set of patch cube uuids to leave alone,
+		 * frozen: Set of cube uuids to keep exactly as they are.
+		 */
+		function blockPatch(model, images, opts = {}) {
+			const s = Object.assign({}, BP_DEFAULTS, opts.settings || {});
+			const excluded = opts.excluded || new Set();
+			const frozen = opts.frozen || new Set();
+			const shade = Math.max(0, Math.min(100, s.wall_shade)) / 100;
+			const res = model.resolution || { width: 16, height: 16 };
+			const scale = tex => {
+				const img = images[tex];
+				return img ? [img.w / (res.width || img.w), img.h / (res.height || img.h)] : [1, 1];
+			};
+			const groups = {};
+			for (const g of model.groups || []) groups[g.uuid] = g;
+			const { parent, groupOrder, nodeOrder } = walkOutliner(model.outliner);
+			const report = { duplicates: 0, cubes_before: 0, cubes_after: 0, cutouts: 0, adds: 0, hollows: 0, merged: 0, faces_culled: 0, warnings: [] };
+			const ops = [];
+
+			// Cubes only interact with cubes that are turned the same way around the same points.
+			const frameKey = el => {
+				const parts = [];
+				let g = parent[el.uuid];
+				while (g) {
+					const grp = groups[g];
+					if (grp && !isZero(grp.rotation)) parts.push(grp.rotation.join(',') + '@' + (grp.origin || [0, 0, 0]).join(','));
+					g = parent[g];
+				}
+				if (!isZero(el.rotation)) parts.push('c' + el.rotation.join(',') + '@' + (el.origin || [0, 0, 0]).join(','));
+				return parts.join('|');
+			};
+
+			const others = [];   // elements BlockPatcher doesn't touch (meshes, locators, ...)
+			let boxes = [];
+			for (const el of model.elements || []) {
+				if (el.type && el.type !== 'cube') { others.push(el); continue; }
+				if (!el.from || !el.to) { others.push(el); continue; }
+				report.cubes_before++;
+				const kind = patchKind(el.name, s);
+				const box = {
+					uuid: el.uuid, el, from: el.from.slice(), to: el.to.slice(), name: el.name,
+					group: parent[el.uuid] || null, frame: frameKey(el), kind,
+					src: new Set([el.uuid]), ops: new Set(kind ? [el.uuid] : []),
+					frozen: frozen.has(el.uuid) || (!kind && !isZero([el.inflate || 0, 0, 0])),
+					changed: false, holey: false, faces: {}
+				};
+				// hollows made earlier ("HOLLOW notch", "HOLLOW into ...") are pockets, not solid
+				if (!kind && s.hollow_name && String(el.name || '').trim().startsWith(s.hollow_name)) { box.hollow = true; box.frozen = true; }
+				if (kind && excluded.has(el.uuid)) { box.kind = null; box.frozen = true; box.passive = true; box.excludedPatch = kind; }
+				for (const d of BP_FACES) {
+					const f = el.faces && el.faces[d];
+					box.faces[d] = (f && f.texture !== null && f.texture !== undefined && f.texture !== false && Array.isArray(f.uv))
+						? readFace(box, d, f, images, scale) : null;
+				}
+				// a cube you can see through somewhere can't hide what's behind or inside it
+				box.holey = BP_FACES.some(d => box.faces[d] && !opaqueFace(box.faces[d]));
+				boxes.push(box);
+			}
+			const solids = () => boxes.filter(b => !b.kind && !b.passive && !b.hollow);
+			const describe = b => b.name + ' [' + b.from.join(',') + ' → ' + b.to.join(',') + ']';
+
+			/* 1. ADD: becomes part of the cube it attaches to */
+			for (const A of boxes.filter(b => b.kind === 'add')) {
+				const op = { uuid: A.uuid, kind: 'add', name: A.name, status: 'applied', host: null };
+				ops.push(op);
+				let host = null, score = 0;
+				for (const B of solids()) {
+					if (B.frame !== A.frame) continue;
+					const sc = overlapVolume(A, B) * 1000 + contactArea(A, B);
+					if (sc > score) { score = sc; host = B; }
+				}
+				// the part of the ADD cube that isn't inside existing cubes
+				let pieces = [{ from: A.from.slice(), to: A.to.slice() }];
+				for (const B of solids()) {
+					if (B.frame !== A.frame) continue;
+					pieces = pieces.flatMap(p => subtractBox(p, B));
+				}
+				boxes = boxes.filter(b => b !== A);
+				if (!pieces.length) { op.status = 'nothing'; op.note = 'already inside existing cubes'; continue; }
+				if (host) op.host = host.name;
+				else report.warnings.push(describe(A) + ' touches no cube, kept on its own');
+				for (const p of pieces) {
+					const nb = {
+						uuid: null, el: host ? host.el : A.el, from: p.from, to: p.to,
+						name: host ? host.name : 'cube', group: host ? host.group : A.group, frame: A.frame, kind: null,
+						src: new Set([A.uuid]), ops: new Set([A.uuid]), frozen: false, changed: true, holey: false, faces: {}, added: true
+					};
+					for (const d of BP_FACES) {
+						if (host && s.retexture_add) {
+							const sd = patternSource(host, d);
+							nb.faces[d] = sd ? patternFace(nb, d, host, sd, 1) : null;
+						} else {
+							nb.faces[d] = A.faces[d] ? cropFace(A.faces[d], A, p, d) : null;
+						}
+					}
+					boxes.push(nb);
+				}
+				report.adds++;
+			}
+
+			/* 2. CUTOUT: carve real empty space */
+			for (const C of boxes.filter(b => b.kind === 'cutout')) {
+				const op = { uuid: C.uuid, kind: 'cutout', name: C.name, status: 'applied', host: null };
+				ops.push(op);
+				const hits = solids().filter(B => B.frame === C.frame && !B.frozen && overlapsVolume(B, C));
+				boxes = boxes.filter(b => b !== C);
+				if (!hits.length) { op.status = 'nothing'; op.note = 'cuts into nothing'; continue; }
+				op.host = hits.map(b => b.name).filter((v, i, a) => a.indexOf(v) === i).join(', ');
+				for (const B of hits) {
+					const pieces = subtractBox(B, C);
+					boxes = boxes.filter(b => b !== B);
+					for (const p of pieces) {
+						const nb = Object.assign({}, B, {
+							uuid: null, from: p.from, to: p.to, faces: {}, changed: true,
+							src: new Set(B.src), ops: new Set([...B.ops, C.uuid])
+						});
+						for (const d of BP_FACES) {
+							const [a, sg] = BP_DIRS[d];
+							const q = facePlane(p, d);
+							if (Math.abs(q - facePlane(B, d)) < EPS) {
+								nb.faces[d] = B.faces[d] ? cropFace(B.faces[d], B, p, d) : null;
+							} else if (Math.abs((sg > 0 ? C.from[a] : C.to[a]) - q) < EPS && rectIntersect(faceRect(p, d), faceRect(C, d))) {
+								// a new wall looking into the cut
+								const sd = patternSource(B, d);
+								nb.faces[d] = sd ? patternFace(nb, d, B, sd, shade) : null;
+							} else {
+								nb.faces[d] = null; // seam between two pieces of the same cube
+							}
+						}
+						boxes.push(nb);
+					}
+				}
+				// cubes next to the cut whose touching side had no face now show into the hole
+				for (const X of solids()) {
+					if (X.frame !== C.frame || X.frozen) continue;
+					for (const d of BP_FACES) {
+						if (X.faces[d]) continue;
+						const [a, sg] = BP_DIRS[d];
+						const q = facePlane(X, d);
+						if (Math.abs((sg > 0 ? C.from[a] : C.to[a]) - q) >= EPS) continue;
+						if (!rectIntersect(faceRect(X, d), faceRect(C, d))) continue;
+						const sd = patternSource(X, d);
+						if (sd) { X.faces[d] = patternFace(X, d, X, sd, shade); X.changed = true; X.ops.add(C.uuid); }
+					}
+				}
+				report.cutouts++;
+			}
+
+			/* 3. HOLLOW: a see-through pocket made with texture instead of geometry */
+			for (const H of boxes.filter(b => b.kind === 'hollow')) {
+				const op = { uuid: H.uuid, kind: 'hollow', name: H.name, status: 'applied', host: null };
+				ops.push(op);
+				const near = solids().filter(B => B.frame === H.frame);
+				const hosts = near.filter(B => overlapsVolume(B, H)).sort((a, b) => overlapVolume(b, H) - overlapVolume(a, H));
+				if (!hosts.length) { op.status = 'nothing'; op.note = 'not inside any cube'; boxes = boxes.filter(b => b !== H); continue; }
+				const host = hosts[0];
+				op.host = host.name;
+				H.kind = null; H.hollow = true; H.changed = true; H.frozen = false;
+				H.name = s.hollow_name + ' into ' + host.name;
+				H.group = host.group; H.el = Object.assign({}, H.el, { inflate: 0 });
+				// its own faces: open where it sits flush on the surface of a host, walls everywhere else
+				for (const d of BP_FACES) {
+					const [a, sg] = BP_DIRS[d];
+					const q = facePlane(H, d), r = faceRect(H, d);
+					const onSurface = hosts.some(B => Math.abs(facePlane(B, d) - q) < EPS && rectIntersect(faceRect(B, d), r));
+					let open = false;
+					if (onSurface) {
+						// ... unless something outside closes it off
+						const cover = near.filter(B => !hosts.includes(B) && Math.abs((sg > 0 ? B.from[a] : B.to[a]) - q) < EPS)
+							.map(B => rectIntersect(faceRect(B, d), r)).filter(Boolean);
+						open = !rectsCover(r, cover);
+					}
+					if (open) H.faces[d] = null;
+					else {
+						const sd = patternSource(host, d);
+						H.faces[d] = sd ? patternFace(H, d, host, sd, shade) : null;
+					}
+				}
+				// everything that would show inside the pocket turns see-through
+				for (const B of near) {
+					if (B.frozen) continue;
+					for (const d of BP_FACES) {
+						const f = B.faces[d];
+						if (!f) continue;
+						const [a] = BP_DIRS[d];
+						const q = facePlane(B, d);
+						if (q < H.from[a] - EPS || q > H.to[a] + EPS) continue;
+						const r = rectIntersect(faceRect(B, d), faceRect(H, d));
+						if (!r) continue;
+						if (clearRect(f, B, d, r)) {
+							B.changed = true; B.holey = true; B.ops.add(H.uuid);
+							if (emptyFace(f)) B.faces[d] = null;
+						}
+					}
+				}
+				report.hollows++;
+			}
+			// excluded patch cubes go back to being plain cubes for the rest of the run, untouched
+			for (const b of boxes) if (b.excludedPatch) {
+				ops.push({ uuid: b.uuid, kind: b.excludedPatch, name: b.name, status: 'excluded', host: null });
+				b.kind = null;
+			}
+
+			/* 4. exact duplicates (same place, same look) are one cube too many */
+			{
+				const seen = new Map();
+				const look = b => BP_FACES.map(d => b.faces[d] ? b.faces[d].tex + '/' + imageKey(b.faces[d].img) : '-').join('|');
+				boxes = boxes.filter(b => {
+					if (b.kind || b.frozen || b.hollow || b.passive) return true;
+					const k = [b.group, b.frame, b.from.join(), b.to.join(), look(b)].join('#');
+					const first = seen.get(k);
+					if (!first) { seen.set(k, b); return true; }
+					first.src = new Set([...first.src, ...b.src]); first.changed = true;
+					report.duplicates = (report.duplicates || 0) + 1;
+					return false;
+				});
+			}
+
+			/* 4/5. merge cubes that form one box, drop faces nobody can see */
+			const canMerge = b => !b.frozen && !b.hollow && !b.kind && !b.passive;
+			const mergeGate = (A, B) => s.merge === 'all' || (s.merge === 'patched' && (A.changed || B.changed));
+			function mergePair(A, B, k) {
+				// A is below B along k
+				const faces = {};
+				for (const d of BP_FACES) {
+					const [a, sg] = BP_DIRS[d];
+					if (a === k) { faces[d] = sg > 0 ? B.faces[d] : A.faces[d]; continue; }
+					const fa = A.faces[d], fb = B.faces[d];
+					if (!fa && !fb) { faces[d] = null; continue; }
+					if (!fa || !fb || fa.tex !== fb.tex) return null;
+					if (Math.abs(fa.ppu[0] - fb.ppu[0]) > EPS || Math.abs(fa.ppu[1] - fb.ppu[1]) > EPS) return null;
+					const ax = BP_AXES[d];
+					const alongU = ax.u[0] === k;
+					const first = (alongU ? ax.u[2] : ax.v[2]) > 0 ? fa : fb, second = first === fa ? fb : fa;
+					if (alongU ? first.img.h !== second.img.h : first.img.w !== second.img.w) return null;
+					const img = alongU ? newImage(first.img.w + second.img.w, first.img.h) : newImage(first.img.w, first.img.h + second.img.h);
+					blit(img, first.img, 0, 0);
+					blit(img, second.img, alongU ? first.img.w : 0, alongU ? 0 : first.img.h);
+					faces[d] = { img, tex: fa.tex, ppu: fa.ppu.slice() };
+				}
+				const nb = Object.assign({}, A, {
+					uuid: null, from: A.from.slice(), to: B.to.slice(), faces, changed: true,
+					src: new Set([...A.src, ...B.src]), ops: new Set([...A.ops, ...B.ops])
+				});
+				for (let i = 0; i < 3; i++) { nb.from[i] = Math.min(A.from[i], B.from[i]); nb.to[i] = Math.max(A.to[i], B.to[i]); }
+				return nb;
+			}
+			function mergeAll() {
+				if (s.merge === 'off') return;
+				let again = true;
+				while (again) {
+					again = false;
+					for (let k = 0; k < 3; k++) {
+						const o = [0, 1, 2].filter(i => i !== k);
+						const key = (b, at) => [k, b.group, b.frame, b.from[o[0]], b.to[o[0]], b.from[o[1]], b.to[o[1]], at].join('|');
+						const byStart = new Map();
+						for (const b of boxes) if (canMerge(b)) byStart.set(key(b, b.from[k]), b);
+						const gone = new Set();
+						for (const A of boxes.slice()) {
+							if (gone.has(A) || !canMerge(A)) continue;
+							const B = byStart.get(key(A, A.to[k]));
+							if (!B || B === A || gone.has(B) || !mergeGate(A, B)) continue;
+							const nb = mergePair(A, B, k);
+							if (!nb) continue;
+							gone.add(A); gone.add(B);
+							byStart.delete(key(B, B.from[k]));
+							boxes = boxes.filter(b => b !== A && b !== B);
+							boxes.push(nb);
+							report.merged++;
+							again = true;
+						}
+					}
+				}
+			}
+			function cullAll() {
+				if (!s.cull_hidden) return;
+				const solid = boxes.filter(b => !b.kind && !b.hollow && !b.passive);
+				for (const X of solid) {
+					if (X.frozen) continue;
+					for (const d of BP_FACES) {
+						if (!X.faces[d]) continue;
+						const [a, sg] = BP_DIRS[d];
+						const q = facePlane(X, d), r = faceRect(X, d);
+						const cover = [];
+						for (const Y of solid) {
+							if (Y === X || Y.frame !== X.frame) continue;
+							const i = rectIntersect(r, faceRect(Y, d));
+							if (!i) continue;
+							if (Y.from[a] < q - EPS && Y.to[a] > q + EPS) { if (!Y.holey) cover.push(i); continue; }
+							if (Math.abs((sg > 0 ? Y.from[a] : Y.to[a]) - q) >= EPS) continue;
+							const yf = Y.faces[BP_OPPOSITE[d]];
+							if (!yf || opaqueIn(yf, Y, BP_OPPOSITE[d], i)) cover.push(i);
+						}
+						if (rectsCover(r, cover)) { X.faces[d] = null; X.changed = true; report.faces_culled++; }
+					}
+				}
+			}
+			mergeAll();
+			cullAll();
+			mergeAll();
+
+			/* 6. UV layout */
+			const outIndex = {};
+			nodeOrder.forEach((u, i) => { outIndex[u] = i; });
+			const groupRank = {};
+			groupOrder.forEach((u, i) => { groupRank[u] = i; });
+			const firstSrcRank = b => Math.min(...[...b.src].map(u => outIndex[u] ?? 1e9));
+			boxes.sort((a, b) => ((groupRank[a.group] ?? -1) - (groupRank[b.group] ?? -1)) || (firstSrcRank(a) - firstSrcRank(b)));
+
+			// which original UV rects are used by more than one face (those can't be edited in place)
+			const rectUse = new Map();
+			const rectKey = f => f.tex + ':' + f.uv.map(n => Math.round(n * 1000)).sort((a, b) => a - b).join(',');
+			for (const el of model.elements || []) {
+				if (!el.faces) continue;
+				for (const d of BP_FACES) {
+					const f = el.faces[d];
+					if (f && f.texture !== null && f.texture !== undefined && Array.isArray(f.uv)) {
+						const k = rectKey({ tex: f.texture, uv: f.uv });
+						rectUse.set(k, (rectUse.get(k) || 0) + 1);
+					}
+				}
+			}
+			const texCount = Math.max(images.length, 1);
+			const keep = [], place = [];
+			for (const b of boxes) {
+				for (const d of BP_FACES) {
+					const f = b.faces[d];
+					if (!f) continue;
+					const untouched = !b.changed && f.orig;
+					if (s.uv_mode === 'changed' && f.orig && b.from.every((v, i) => v === b.el.from[i]) && b.to.every((v, i) => v === b.el.to[i]) && b.src.size === 1) {
+						const k = rectKey({ tex: f.orig.texture, uv: f.orig.uv });
+						if (untouched || (rectUse.get(k) || 0) <= 1) { keep.push({ b, d, f }); continue; }
+					}
+					place.push({ b, d, f });
+				}
+			}
+			const outImages = [];
+			const pad = Math.max(0, Math.round(s.padding || 0));
+			const placed = new Map(); // face -> {x, y}
+			let outW = 0, outH = 0;
+			for (let t = 0; t < texCount; t++) {
+				const src = images[t];
+				const mine = place.filter(p => p.f.tex === t);
+				const keepMine = keep.filter(k => k.f.tex === t);
+				const top = s.uv_mode === 'changed' && keepMine.length && src ? src.h + pad : 0;
+				// Two layouts, the smaller one wins: every cube's faces side by side in one strip (like
+				// box UV, easiest to paint), or every face on its own. Both keep groups together.
+				const asBlocks = [], asFaces = [];
+				let cur = null;
+				for (const p of mine) {
+					if (!cur || cur.b !== p.b) { cur = { group: p.b.group, faces: [], w: 0, h: 0 }; asBlocks.push(cur); }
+					cur.faces.push(p);
+					cur.w += p.f.img.w + (cur.faces.length > 1 ? pad : 0);
+					cur.h = Math.max(cur.h, p.f.img.h);
+					asFaces.push({ group: p.b.group, faces: [p], w: p.f.img.w, h: p.f.img.h });
+				}
+				let width = Math.max(src ? src.w : 16, ...asBlocks.map(b => b.w));
+				width = Math.max(16, Math.ceil(width / 16) * 16);
+				const packedBlocks = skyline(asBlocks, width, top, pad);
+				const packedFaces = skyline(asFaces.slice(), width, top, pad);
+				const useBlocks = packedBlocks.height <= packedFaces.height * 1.05;
+				const blocks = useBlocks ? asBlocks : asFaces;
+				if (!useBlocks) for (const bl of asFaces) { bl.x = bl._x; bl.y = bl._y; }
+				else for (const bl of asBlocks) { bl.x = bl._x; bl.y = bl._y; }
+				let height = blocks.length ? (useBlocks ? packedBlocks.height : packedFaces.height) : top;
+				if (s.uv_mode === 'changed' && src) height = Math.max(height, src.h);
+				height = Math.max(16, Math.ceil(height / 16) * 16);
+				const img = newImage(width, height);
+				if (s.uv_mode === 'changed' && src) blit(img, src, 0, 0);
+				for (const k of keepMine) {
+					// edited in place (hollow cuts): write the face back where it was
+					if (k.b.changed) writeBack(img, k, scale);
+				}
+				for (const bl of blocks) {
+					let fx = bl.x;
+					for (const p of bl.faces) {
+						blit(img, p.f.img, fx, bl.y);
+						placed.set(p.f, { x: fx, y: bl.y });
+						fx += p.f.img.w + pad;
+					}
+				}
+				outImages.push(img);
+				outW = Math.max(outW, width); outH = Math.max(outH, height);
+			}
+			function writeBack(img, k, scaleFn) {
+				const f = k.f, o = f.orig;
+				const [fx, fy] = scaleFn(o.texture);
+				const c = faceCorners(o);
+				const du = [(c[1][0] - c[0][0]) * fx, (c[1][1] - c[0][1]) * fy];
+				const dv = [(c[2][0] - c[0][0]) * fx, (c[2][1] - c[0][1]) * fy];
+				for (let j = 0; j < f.img.h; j++) for (let i = 0; i < f.img.w; i++) {
+					const sx = (i + 0.5) / f.img.w, ty = (j + 0.5) / f.img.h;
+					const x = Math.floor(c[0][0] * fx + sx * du[0] + ty * dv[0]), y = Math.floor(c[0][1] * fy + sx * du[1] + ty * dv[1]);
+					if (x < 0 || y < 0 || x >= img.w || y >= img.h) continue;
+					const si = (j * f.img.w + i) * 4, di = (y * img.w + x) * 4;
+					img.data[di] = f.img.data[si]; img.data[di + 1] = f.img.data[si + 1]; img.data[di + 2] = f.img.data[si + 2]; img.data[di + 3] = f.img.data[si + 3];
+				}
+			}
+			// all textures share the project's UV size: grow the smaller ones
+			const outRes = { width: outW, height: outH };
+			for (let t = 0; t < outImages.length; t++) {
+				const im = outImages[t];
+				if (im.w !== outW || im.h !== outH) { const big = newImage(outW, outH); blit(big, im, 0, 0); outImages[t] = big; }
+			}
+			// keep the UV units of the original project (a 2x texture stays 2x)
+			const [sx0, sy0] = scale(0);
+			outRes.width = Math.round(outW / (sx0 || 1));
+			outRes.height = Math.round(outH / (sy0 || 1));
+
+			/* 7. back to elements */
+			const used = new Set();
+			const provenance = {};
+			const elements = [];
+			for (const b of boxes) {
+				let uuid = null;
+				for (const u of b.src) if (!used.has(u)) { uuid = u; break; }
+				if (!uuid) uuid = bpUuid();
+				used.add(uuid);
+				const base = b.el || {};
+				const el = JSON.parse(JSON.stringify(Object.assign({}, base, { faces: undefined })));
+				delete el.faces; delete el.uv_offset;
+				Object.assign(el, { uuid, name: b.name, from: b.from, to: b.to, box_uv: false, autouv: 0, faces: {} });
+				if (b.hollow) el.inflate = 0;
+				for (const d of BP_FACES) {
+					const f = b.faces[d];
+					if (!f) { el.faces[d] = { uv: [0, 0, 0, 0], texture: null }; continue; }
+					const k = keep.find(k => k.f === f);
+					if (k) { el.faces[d] = JSON.parse(JSON.stringify(f.orig)); continue; }
+					const pos = placed.get(f);
+					const [fx, fy] = [outImages[f.tex].w / outRes.width, outImages[f.tex].h / outRes.height];
+					el.faces[d] = { uv: [pos.x / fx, pos.y / fy, (pos.x + f.img.w) / fx, (pos.y + f.img.h) / fy], texture: f.tex };
+				}
+				elements.push(el);
+				provenance[uuid] = { src: [...b.src], ops: [...b.ops], changed: !!b.changed, name: b.name };
+			}
+			report.cubes_after = elements.length;
+
+			/* 8. outliner: same tree, cubes swapped in their groups */
+			// each new cube goes where the first original cube it came from was, in its own group;
+			// cubes with no such place (ADD cubes that moved group) go to the end of the group
+			const anchored = new Map(), byGroupOut = new Map();
+			boxes.forEach((b, i) => {
+				const g = b.group || null;
+				let anchor = null, best = Infinity;
+				for (const u of b.src) {
+					if ((parent[u] || null) === g && (outIndex[u] ?? Infinity) < best) { best = outIndex[u]; anchor = u; }
+				}
+				const map = anchor ? anchored : byGroupOut, key = anchor || g;
+				if (!map.has(key)) map.set(key, []);
+				map.get(key).push(elements[i].uuid);
+			});
+			const cubeIds = new Set((model.elements || []).filter(e => !(e.type && e.type !== 'cube') && e.from).map(e => e.uuid));
+			function rebuild(list, g) {
+				const out = [];
+				for (const item of list || []) {
+					if (typeof item === 'string') {
+						if (!cubeIds.has(item)) out.push(item);
+						else for (const u of anchored.get(item) || []) out.push(u);
+					} else if (item && item.uuid) {
+						const copy = Object.assign({}, item);
+						copy.children = rebuild(item.children || item.content, item.uuid);
+						delete copy.content;
+						out.push(copy);
+					}
+				}
+				for (const u of byGroupOut.get(g) || []) out.push(u);
+				return out;
+			}
+			const outModel = Object.assign({}, model, {
+				elements: others.concat(elements),
+				outliner: rebuild(model.outliner, null),
+				resolution: outRes
+			});
+			report.texture_before = images.map(im => im ? im.w + '×' + im.h : '-').join(', ');
+			report.texture_after = outImages.map(im => im.w + '×' + im.h).join(', ');
+			return { model: outModel, images: outImages, report, ops, provenance };
+		}
+
+
+		/* --- Blockbench side --- */
+		if (typeof module !== 'undefined' && module.exports) {
+			Object.assign(module.exports, { blockPatch, subtractBox, rectsCover, skyline, BP_DEFAULTS });
+		}
+		if (typeof Plugin === 'undefined') return;
+
+		const BP_STORAGE = 'block_patcher_settings';
+		const BP_COLOR = '#d7263d';
+		const KIND_STYLE = {
+			add: { icon: 'add_box', color: '#3ddc84', label: 'Add' },
+			cutout: { icon: 'indeterminate_check_box', color: '#d7263d', label: 'Cut out' },
+			hollow: { icon: 'check_box_outline_blank', color: '#4aa8ff', label: 'Hollow' }
+		};
+		const bpSettings = Object.assign({}, BP_DEFAULTS);
+		try { Object.assign(bpSettings, JSON.parse(localStorage.getItem(BP_STORAGE) || '{}')); } catch (e) {}
+		function saveBpSettings() {
+			const copy = Object.assign({}, bpSettings);
+			delete copy.add_name; delete copy.cutout_name; delete copy.hollow_name;
+			try { localStorage.setItem(BP_STORAGE, JSON.stringify(copy)); } catch (e) {}
+		}
+		/** The names the Block Grid Cube tool gives its cubes. */
+		function patchNames() {
+			let m = {};
+			try { m = JSON.parse(localStorage.getItem('block_grid_modeler_settings') || '{}'); } catch (e) {}
+			return { add_name: m.add_name || 'ADD', cutout_name: m.cutout_name || 'CUTOUT', hollow_name: m.hollow_name || 'HOLLOW' };
+		}
+
+		let session = null;   // the open BlockPatcher run, see runBlockPatcher
+		let bpPanel, bpAction, markerTool, bpStyle;
+		const bpListeners = [];
+
+		/* images in and out of Blockbench */
+		function textureImage(tex) {
+			const src = tex.canvas && tex.canvas.width ? tex.canvas : tex.img;
+			const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
+			if (!w || !h) return null;
+			const c = document.createElement('canvas');
+			c.width = w; c.height = h;
+			const ctx = c.getContext('2d');
+			ctx.drawImage(src, 0, 0);
+			const d = ctx.getImageData(0, 0, w, h);
+			return { w, h, data: d.data };
+		}
+		function imageToDataURL(img) {
+			const c = document.createElement('canvas');
+			c.width = img.w; c.height = img.h;
+			c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(img.data), img.w, img.h), 0, 0);
+			return c.toDataURL('image/png');
+		}
+		function waitFor(test, ms = 4000) {
+			return new Promise(resolve => {
+				const start = Date.now();
+				(function tick() {
+					if (test() || Date.now() - start > ms) resolve();
+					else setTimeout(tick, 30);
+				})();
+			});
+		}
+
+		/** Patch the session's snapshot and show the result in the preview tab. */
+		async function buildPreview() {
+			const s = session;
+			const settings = Object.assign({}, bpSettings, patchNames());
+			s.result = blockPatch(s.snapshot, s.images, { settings, excluded: s.excluded, frozen: s.frozen });
+			const model = JSON.parse(JSON.stringify(Object.assign({}, s.result.model, { textures: undefined, animations: undefined })));
+			model.textures = s.snapshot.textures.map((t, i) => {
+				const copy = Object.assign({}, t);
+				delete copy.path; delete copy.relative_path;
+				copy.internal = true; copy.saved = true;
+				if (s.result.images[i]) {
+					copy.source = imageToDataURL(s.result.images[i]);
+					copy.width = s.result.images[i].w; copy.height = s.result.images[i].h;
+					copy.uv_width = model.resolution.width; copy.uv_height = model.resolution.height;
+				}
+				return copy;
+			});
+			delete model.editor_state;
+			delete model.history;
+			model.animations = [];
+
+			// keep the camera where it was when the preview is rebuilt
+			let cam = null;
+			if (s.preview && Preview.selected) {
+				cam = { pos: Preview.selected.camera.position.clone(), target: Preview.selected.controls.target.clone() };
+			}
+			if (s.preview && ModelProject.all.includes(s.preview)) {
+				s.rebuilding = true;
+				await s.preview.close(true);
+				s.rebuilding = false;
+			}
+			Codecs.project.load(model, { path: 'BlockPatcher preview.bbmodel', no_file: true });
+			s.preview = Project;
+			Project.name = (s.og.name || 'model') + ' · BlockPatcher';
+			Project.block_patcher_preview = true;
+			Project.saved = true;
+			s.marked = new Set();
+			s.lastIds = new Set(Outliner.elements.map(e => e.uuid));
+			if (cam && Preview.selected) {
+				Preview.selected.camera.position.copy(cam.pos);
+				Preview.selected.controls.target.copy(cam.target);
+			}
+			if (Modes.options.edit && !Modes.edit) Modes.options.edit.select();
+			updateInterfacePanels();
+			syncBpPanel();
+		}
+
+		async function runBlockPatcher() {
+			if (!Project) return;
+			if (session && session.preview && ModelProject.all.includes(session.preview)) {
+				session.preview.select();
+				Blockbench.showQuickMessage('BlockPatcher preview is already open', 1500);
+				return;
+			}
+			if (Project.block_patcher_preview) return;
+			if (!Format || Format.id === 'image') return;
+			const og = Project;
+			const snapshot = Codecs.project.compile({ raw: true, bitmaps: true, absolute_paths: false });
+			const images = Texture.all.map(textureImage);
+			if (!Texture.all.length) {
+				Blockbench.showMessageBox({ title: 'BlockPatcher', message: 'This model has no texture yet. BlockPatcher needs one to paint walls and lay out UVs.' });
+				return;
+			}
+			session = { og, snapshot, images, excluded: new Set(), frozen: new Set(), restoreLog: [], marked: new Set(), preview: null, result: null };
+			Blockbench.showQuickMessage('BlockPatcher…', 600);
+			await new Promise(r => setTimeout(r, 20));
+			try {
+				await buildPreview();
+			} catch (err) {
+				console.error(err);
+				session = null;
+				og.select();
+				Blockbench.showMessageBox({ title: 'BlockPatcher', message: 'Something went wrong: ' + err.message });
+				return;
+			}
+			const r = session.result.report;
+			if (!session.result.ops.length) {
+				Blockbench.showQuickMessage('No ADD, CUTOUT or HOLLOW cubes found: only merged, cleaned up and laid out UVs', 3000);
+			}
+		}
+
+		/** What the marked or selected preview cubes came from: their patch cubes are skipped, their original cubes kept as they were. */
+		function restore(ids) {
+			const s = session;
+			let n = 0;
+			for (const id of ids) {
+				const p = s.result.provenance[id];
+				if (!p) continue;
+				n++;
+				const opIds = new Set(s.result.ops.map(o => o.uuid));
+				const srcs = p.src.filter(src => !opIds.has(src));
+				for (const op of p.ops) s.excluded.add(op);
+				for (const src of srcs) s.frozen.add(src);
+				s.restoreLog.push({ ops: p.ops.slice(), srcs });
+			}
+			return n;
+		}
+		async function restoreMarked(fromDelete) {
+			const s = session;
+			if (!s) return;
+			const ids = new Set([...s.marked, ...(fromDelete || []), ...(fromDelete ? [] : Outliner.selected.map(e => e.uuid))]);
+			if (!ids.size) {
+				Blockbench.showQuickMessage('Mark parts with the BlockPatcher Marker first (or select them)', 2000);
+				return;
+			}
+			const editsBefore = Undo.history.length - (fromDelete ? 1 : 0);
+			if (editsBefore > 0 && !(await confirmLoseEdits())) return;
+			const n = restore(ids);
+			if (!n) { Blockbench.showQuickMessage('Those parts were not changed by BlockPatcher', 2000); return; }
+			await buildPreview();
+			Blockbench.showQuickMessage(`Restored ${n} part${n === 1 ? '' : 's'}`, 1500);
+		}
+		function confirmLoseEdits() {
+			return new Promise(resolve => {
+				Blockbench.showMessageBox({
+					title: 'BlockPatcher',
+					message: 'This rebuilds the preview from your model, so changes you made by hand in the preview are lost. Continue?',
+					buttons: ['Rebuild', 'Cancel']
+				}, answer => resolve(answer === 0));
+			});
+		}
+		async function rerun() {
+			if (!session) return;
+			if (Undo.history.length > 0 && !(await confirmLoseEdits())) return;
+			await buildPreview();
+		}
+
+		/** Write the preview back into the original model, as one undo step. */
+		async function confirmPatch() {
+			const s = session;
+			if (!s) return;
+			if (!ModelProject.all.includes(s.og)) {
+				Blockbench.showMessageBox({ title: 'BlockPatcher', message: 'The original model was closed, so there is nothing to apply this to. You can still save the preview tab on its own.' });
+				return;
+			}
+			s.preview.select();
+			const model = Codecs.project.compile({ raw: true, bitmaps: false });
+			const urls = Texture.all.map(t => t.getDataURL());
+			s.rebuilding = true;
+			await s.preview.close(true);
+			s.rebuilding = false;
+			session = null;
+			s.og.select();
+
+			const oldCubes = Cube.all.slice();
+			Undo.initEdit({ elements: oldCubes, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
+			oldCubes.forEach(c => c.remove());
+			for (const g of model.groups || []) {
+				if (!OutlinerNode.uuids[g.uuid]) new Group(g, g.uuid).init();
+			}
+			const added = [];
+			for (const template of model.elements || []) {
+				if (template.type && template.type !== 'cube') continue;
+				const copy = OutlinerElement.fromSave(template, true);
+				for (const face in copy.faces) {
+					const t = template.faces && template.faces[face] && template.faces[face].texture;
+					const tex = (t !== null && t !== undefined && t !== false) ? Texture.all[t] : null;
+					copy.faces[face].texture = tex ? tex.uuid : null;
+				}
+				copy.init();
+				added.push(copy);
+			}
+			Outliner.loadJSON(model.outliner);
+			Project.texture_width = model.resolution.width;
+			Project.texture_height = model.resolution.height;
+			const waits = [];
+			Texture.all.forEach((tex, i) => {
+				if (!urls[i]) return;
+				const probe = new Image();
+				waits.push(new Promise(resolve => {
+					probe.onload = () => {
+						tex.fromDataURL(urls[i]);
+						waitFor(() => tex.width === probe.width && tex.height === probe.height).then(resolve);
+					};
+					probe.onerror = resolve;
+					probe.src = urls[i];
+				}));
+			});
+			await Promise.all(waits);
+			Canvas.updateAll();
+			Undo.finishEdit('BlockPatcher', { elements: added, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
+			updateInterfacePanels();
+			Blockbench.showQuickMessage(`BlockPatcher applied: ${oldCubes.length} → ${added.length} cubes`, 2500);
+		}
+		async function cancelPatch() {
+			const s = session;
+			if (!s) return;
+			session = null;
+			if (s.preview && ModelProject.all.includes(s.preview)) {
+				s.rebuilding = true;
+				await s.preview.close(true);
+			}
+			if (ModelProject.all.includes(s.og)) s.og.select();
+			updateInterfacePanels();
+		}
+
+		/* --- marker: click parts in the preview that came out wrong --- */
+		const markerMeshes = new Map();
+		function markerMaterial() {
+			if (!markerMaterial.m) markerMaterial.m = new THREE.LineBasicMaterial({ color: 0xff2d55, depthTest: false, transparent: true });
+			return markerMaterial.m;
+		}
+		function drawMarks() {
+			for (const [, m] of markerMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
+			markerMeshes.clear();
+			if (!session || Project !== session.preview) return;
+			for (const id of session.marked) {
+				const el = OutlinerNode.uuids[id];
+				if (!(el instanceof Cube) || !el.mesh) continue;
+				const size = [0, 1, 2].map(i => Math.max(0.01, el.to[i] - el.from[i]) + 0.2);
+				const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size[0], size[1], size[2]));
+				const line = new THREE.LineSegments(geo, markerMaterial());
+				line.renderOrder = 999;
+				line.position.set(
+					(el.from[0] + el.to[0]) / 2 - el.origin[0],
+					(el.from[1] + el.to[1]) / 2 - el.origin[1],
+					(el.from[2] + el.to[2]) / 2 - el.origin[2]
+				);
+				el.mesh.add(line);
+				markerMeshes.set(id, line);
+			}
+		}
+		function toggleMark(el) {
+			if (!session || !el) return;
+			if (session.marked.has(el.uuid)) session.marked.delete(el.uuid);
+			else session.marked.add(el.uuid);
+			drawMarks();
+			syncBpPanel();
+		}
+
+		/* deleting a patched part in the preview puts it back the way it was */
+		function onPreviewEdit() {
+			const s = session;
+			if (!s || s.rebuilding || Project !== s.preview) return;
+			const now = new Set(Outliner.elements.map(e => e.uuid));
+			const gone = [...s.lastIds].filter(id => !now.has(id) && s.result.provenance[id] && s.result.provenance[id].ops.length);
+			s.lastIds = now;
+			if (gone.length) setTimeout(() => restoreMarked(gone), 0);
+			else syncBpPanel();
+		}
+
+		/* --- panel --- */
+		function syncBpPanel() {
+			if (!bpPanel || !bpPanel.vue) return;
+			const v = bpPanel.vue;
+			const s = session;
+			v.active = !!(s && s.result);
+			if (!v.active) return;
+			const r = s.result.report;
+			v.report = {
+				cubes: r.cubes_before + ' → ' + r.cubes_after,
+				merged: r.merged, culled: r.faces_culled, duplicates: r.duplicates,
+				texture: r.texture_before + ' → ' + r.texture_after,
+				warnings: r.warnings.slice()
+			};
+			v.ops = s.result.ops.map(o => Object.assign({}, o, KIND_STYLE[o.kind] || {}, { on: !s.excluded.has(o.uuid) }));
+			v.marked = s.marked.size;
+			v.restored = s.excluded.size + s.frozen.size;
+			v.settings = Object.assign({}, bpSettings);
+			v.marker_on = !!(markerTool && Toolbox.selected === markerTool);
+		}
+		function createBpPanel() {
+			bpPanel = new Panel('block_patcher_panel', {
+				name: 'BlockPatcher',
+				icon: 'auto_fix_high',
+				growable: true,
+				resizable: true,
+				default_side: 'right',
+				condition: () => !!(session && Project && Project === session.preview),
+				default_position: { slot: 'right_bar', float_position: [0, 0], float_size: [320, 640], height: 640 },
+				component: {
+					data() {
+						return { active: false, report: {}, ops: [], marked: 0, restored: 0, settings: Object.assign({}, bpSettings), marker_on: false };
+					},
+					methods: {
+						confirm() { confirmPatch(); },
+						cancel() { cancelPatch(); },
+						restoreMarked() { restoreMarked(); },
+						marker() { if (markerTool) markerTool.select(); syncBpPanel(); },
+						clearMarks() { if (session) { session.marked.clear(); drawMarks(); syncBpPanel(); } },
+						resetRestores() {
+							if (!session) return;
+							session.excluded.clear(); session.frozen.clear(); session.restoreLog = [];
+							rerun();
+						},
+						toggleOp(op) {
+							if (!session) return;
+							if (session.excluded.has(op.uuid)) {
+								session.excluded.delete(op.uuid);
+								// let it work on the cubes that were restored together with it again
+								for (const entry of session.restoreLog.filter(e => e.ops.includes(op.uuid))) {
+									for (const src of entry.srcs) session.frozen.delete(src);
+								}
+								session.restoreLog = session.restoreLog.filter(e => !e.ops.includes(op.uuid));
+							} else session.excluded.add(op.uuid);
+							rerun();
+						},
+						showOp(op) {
+							if (!session) return;
+							const ids = Object.keys(session.result.provenance).filter(id => session.result.provenance[id].ops.includes(op.uuid));
+							unselectAllElements();
+							ids.forEach(id => { const el = OutlinerNode.uuids[id]; if (el && el.markAsSelected) el.markAsSelected(); });
+							updateSelection();
+						},
+						set(key, value) {
+							bpSettings[key] = value;
+							saveBpSettings();
+							rerun();
+						}
+					},
+					template: `
+						<div class="bp_panel">
+							<template v-if="active">
+								<div class="bp_actions">
+									<div class="bp_button bp_primary" @click="confirm()" title="Close the preview and put this into your model (one undo step)"><i class="material-icons">check</i><span>Confirm</span></div>
+									<div class="bp_button" @click="cancel()" title="Close the preview, your model stays as it was"><i class="material-icons">close</i><span>Cancel</span></div>
+								</div>
+
+								<div class="bp_stats">
+									<div><span>Cubes</span><b>{{ report.cubes }}</b></div>
+									<div><span>Texture</span><b>{{ report.texture }}</b></div>
+									<div><span>Merged</span><b>{{ report.merged }}</b></div>
+									<div><span>Hidden faces dropped</span><b>{{ report.culled }}</b></div>
+									<div v-if="report.duplicates"><span>Duplicate cubes</span><b>{{ report.duplicates }}</b></div>
+								</div>
+								<div class="bp_warning" v-for="w in report.warnings">{{ w }}</div>
+
+								<label>Fix what went wrong</label>
+								<div class="bp_actions">
+									<div class="bp_button" :class="{selected: marker_on}" @click="marker()" title="Click parts in the preview that came out wrong"><i class="material-icons" style="color:#ff2d55">ads_click</i><span>Marker</span></div>
+									<div class="bp_button" @click="restoreMarked()" title="Put the marked (or selected) parts back the way they were before BlockPatcher"><i class="material-icons">restore</i><span>Restore {{ marked || 'selected' }}</span></div>
+								</div>
+								<p class="bp_hint">Mark parts with the Marker, or select them, then Restore. Deleting a patched part restores it too. <a v-if="marked" @click="clearMarks()">Clear marks</a> <a v-if="restored" @click="resetRestores()">Undo all restores</a></p>
+
+								<label>Patch cubes <span class="bp_subtle">untick to skip one</span></label>
+								<div class="bp_ops">
+									<div class="bp_op" v-for="op in ops" :key="op.uuid" :class="{off: !op.on}">
+										<input type="checkbox" :checked="op.on" @change="toggleOp(op)">
+										<i class="material-icons" :style="{color: op.color}">{{ op.icon }}</i>
+										<span class="bp_op_name" @click="showOp(op)" title="Select what this made">{{ op.label }}<span class="bp_subtle" v-if="op.host"> in {{ op.host }}</span></span>
+										<span class="bp_subtle" v-if="op.status === 'nothing'" :title="op.note">no effect</span>
+									</div>
+									<p class="bp_hint" v-if="!ops.length">No ADD, CUTOUT or HOLLOW cubes in this model.</p>
+								</div>
+
+								<label>Settings</label>
+								<div class="bp_row" title="How bright new inner walls are, compared with the surface they are cut into">
+									<span>Wall shade</span><input type="range" min="20" max="100" :value="settings.wall_shade" @change="set('wall_shade', Number($event.target.value))"><span class="bp_subtle">{{ settings.wall_shade }}%</span>
+								</div>
+								<div class="bp_row">
+									<span>Merge</span>
+									<select :value="settings.merge" @change="set('merge', $event.target.value)">
+										<option value="all">all cubes that form one box</option>
+										<option value="patched">only around patches</option>
+										<option value="off">off</option>
+									</select>
+								</div>
+								<div class="bp_row">
+									<span>UV</span>
+									<select :value="settings.uv_mode" @change="set('uv_mode', $event.target.value)">
+										<option value="all">repack everything by group</option>
+										<option value="changed">keep untouched UVs, add new at the bottom</option>
+									</select>
+								</div>
+								<div class="bp_row"><span>Padding</span><input type="number" min="0" max="8" :value="settings.padding" @change="set('padding', Number($event.target.value))"><span class="bp_subtle">px between faces</span></div>
+								<div class="bp_row"><input type="checkbox" :checked="settings.cull_hidden" @change="set('cull_hidden', $event.target.checked)"><span>Drop faces nobody can see</span></div>
+								<div class="bp_row"><input type="checkbox" :checked="settings.retexture_add" @change="set('retexture_add', $event.target.checked)"><span>Paint ADD cubes like what they attach to</span></div>
+							</template>
+						</div>
+					`
+				}
+			});
+		}
+
+		parts.push({
+			onload() {
+				bpStyle = Blockbench.addCSS(`
+					[menu_item="block_patcher"] > .icon, [toolbar_item="block_patcher"] .icon,
+					.panel_handle[panel_id="block_patcher_panel"] .icon { color: ${BP_COLOR} !important; }
+					[toolbar_item="block_patcher_marker"] .icon, [menu_item="block_patcher_marker"] > .icon { color: #ff2d55 !important; }
+					.bp_panel { padding: 4px 8px 8px; }
+					.bp_panel > label { display: block; margin: 10px 0 4px; color: var(--color-subtle_text); }
+					.bp_subtle { color: var(--color-subtle_text); font-size: 0.85em; }
+					.bp_actions { display: flex; flex-wrap: wrap; gap: 4px; }
+					.bp_button { display: flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 4px; background-color: var(--color-button); cursor: pointer; }
+					.bp_button:hover { background-color: var(--color-selected); }
+					.bp_button.selected, .bp_primary { background-color: var(--color-accent); color: var(--color-accent_text); }
+					.bp_stats { margin-top: 8px; }
+					.bp_stats > div { display: flex; justify-content: space-between; }
+					.bp_stats span { color: var(--color-subtle_text); }
+					.bp_warning { color: #ffb020; font-size: 0.85em; margin-top: 4px; }
+					.bp_hint { color: var(--color-subtle_text); font-size: 0.85em; margin: 4px 0 0; }
+					.bp_hint a { cursor: pointer; text-decoration: underline; margin-right: 6px; }
+					.bp_ops { max-height: 220px; overflow-y: auto; }
+					.bp_op { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+					.bp_op.off { opacity: 0.5; }
+					.bp_op_name { flex: 1; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+					.bp_op_name:hover { text-decoration: underline; }
+					.bp_row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+					.bp_row select { flex: 1; min-width: 0; }
+					.bp_row input[type=range] { flex: 1; }
+					.bp_row input[type=number] { width: 60px; }
+				`);
+				bpAction = new Action('block_patcher', {
+					name: 'BlockPatcher',
+					description: 'Apply ADD, CUTOUT and HOLLOW cubes, merge cubes and lay out the UV, in a preview tab you confirm',
+					icon: 'auto_fix_high',
+					condition: () => Project && !Project.block_patcher_preview && Modes.edit,
+					click: runBlockPatcher
+				});
+				MenuBar.addAction(bpAction, 'tools');
+				markerTool = new Tool('block_patcher_marker', {
+					name: 'BlockPatcher Marker',
+					description: 'Click parts of the BlockPatcher preview that came out wrong, then Restore them in the BlockPatcher panel',
+					icon: 'ads_click',
+					category: 'tools',
+					cursor: 'crosshair',
+					selectFace: false,
+					selectElements: false,
+					transformerMode: 'hidden',
+					modes: ['edit'],
+					condition: () => !!(session && Project && Project === session.preview),
+					onCanvasClick(data) {
+						if (data && data.element) toggleMark(data.element);
+					},
+					onSelect() { syncBpPanel(); },
+					onUnselect() { setTimeout(syncBpPanel, 0); }
+				});
+				// once only, even if an older copy of this plugin left an entry behind
+				if (Toolbox.children) {
+					for (let i = Toolbox.children.length - 1; i >= 0; i--) {
+						const it = Toolbox.children[i];
+						if ((typeof it === 'string' ? it : it && it.id) === 'block_patcher_marker') Toolbox.children.splice(i, 1);
+					}
+				}
+				try { Toolbox.add(markerTool); } catch (e) {}
+				createBpPanel();
+				bpListeners.push(Blockbench.on('finished_edit', onPreviewEdit));
+				bpListeners.push(Blockbench.on('select_project', () => { drawMarks(); syncBpPanel(); }));
+				bpListeners.push(Blockbench.on('close_project', data => {
+					if (!session || session.rebuilding) return;
+					const p = data && data.project;
+					if (p === session.preview) session = null;               // closed the preview tab: same as Cancel
+					else if (p === session.og) Blockbench.showQuickMessage('The original model of this BlockPatcher preview was closed', 2500);
+				}));
+			},
+			onunload() {
+				bpListeners.forEach(l => l && l.delete && l.delete());
+				bpListeners.length = 0;
+				for (const [, m] of markerMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
+				markerMeshes.clear();
+				if (bpPanel) bpPanel.delete();
+				if (markerTool) markerTool.delete();
+				if (bpAction) bpAction.delete();
+				if (bpStyle && bpStyle.delete) bpStyle.delete();
+				session = null;
+			}
+		});
+
+	})();
+	/* ===================== end BlockPatcher ===================== */
+
 	if (typeof Plugin === 'undefined') return;
 
 	Plugin.register('model_texture_garage', {
@@ -3367,7 +4750,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.6.0',
+		version: '1.7.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
