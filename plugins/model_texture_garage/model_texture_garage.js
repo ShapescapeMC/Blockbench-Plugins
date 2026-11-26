@@ -19,6 +19,7 @@
  * - BlockPatcher: turns those cubes into real geometry (cuts, added cubes,
  *   see-through hollows), merges cubes, drops hidden faces and lays out the
  *   UV, in a preview tab where you can restore what went wrong, then confirm.
+ * - Organize UV: lays out the UV again without touching the geometry.
  *
  * Alt picks a colour with every brush, as with the normal brush. Presets
  * live in the "edge_noise_presets" folder in Blockbench's user data folder.
@@ -3392,6 +3393,8 @@
 			cull_hidden: true,       // drop faces that are fully covered by touching cubes
 			uv_mode: 'all',          // 'all' repack everything by group | 'changed' keep untouched faces where they are
 			padding: 0,              // pixels between packed faces
+			uv_cull: false,          // Organize UV: drop hidden faces too
+			uv_only: false,          // Organize UV: leave geometry alone, only lay out the UV (and drop hidden faces if cull_hidden)
 		};
 
 		const BP_FACES = ['east', 'north', 'west', 'south', 'up', 'down'];
@@ -3781,7 +3784,7 @@
 				if (el.type && el.type !== 'cube') { others.push(el); continue; }
 				if (!el.from || !el.to) { others.push(el); continue; }
 				report.cubes_before++;
-				const kind = patchKind(el.name, s);
+				const kind = s.uv_only ? null : patchKind(el.name, s);
 				const box = {
 					uuid: el.uuid, el, from: el.from.slice(), to: el.to.slice(), name: el.name,
 					group: parent[el.uuid] || null, frame: frameKey(el), kind,
@@ -3947,7 +3950,7 @@
 			}
 
 			/* 4. exact duplicates (same place, same look) are one cube too many */
-			{
+			if (!s.uv_only) {
 				const seen = new Map();
 				const look = b => BP_FACES.map(d => b.faces[d] ? b.faces[d].tex + '/' + imageKey(b.faces[d].img) : '-').join('|');
 				boxes = boxes.filter(b => {
@@ -3991,7 +3994,7 @@
 				return nb;
 			}
 			function mergeAll() {
-				if (s.merge === 'off') return;
+				if (s.merge === 'off' || s.uv_only) return;
 				let again = true;
 				while (again) {
 					again = false;
@@ -4062,6 +4065,35 @@
 					if (f && f.texture !== null && f.texture !== undefined && Array.isArray(f.uv)) {
 						const k = rectKey({ tex: f.texture, uv: f.uv });
 						rectUse.set(k, (rectUse.get(k) || 0) + 1);
+					}
+				}
+			}
+			// Painted pixels no face of this model uses may belong to other models sharing the texture:
+			// repacking everything would drop them, so say so.
+			if (s.uv_mode === 'all') {
+				for (let t = 0; t < images.length; t++) {
+					const img = images[t];
+					if (!img) continue;
+					const used = new Uint8Array(img.w * img.h);
+					const [fx, fy] = scale(t);
+					for (const el of model.elements || []) {
+						for (const d of BP_FACES) {
+							const f = el.faces && el.faces[d];
+							if (!f || f.texture !== t || !Array.isArray(f.uv)) continue;
+							const x0 = Math.max(0, Math.floor(Math.min(f.uv[0], f.uv[2]) * fx)), x1 = Math.min(img.w, Math.ceil(Math.max(f.uv[0], f.uv[2]) * fx));
+							const y0 = Math.max(0, Math.floor(Math.min(f.uv[1], f.uv[3]) * fy)), y1 = Math.min(img.h, Math.ceil(Math.max(f.uv[1], f.uv[3]) * fy));
+							for (let y = y0; y < y1; y++) used.fill(1, y * img.w + x0, y * img.w + x1);
+						}
+					}
+					let painted = 0, unused = 0;
+					for (let i = 0; i < used.length; i++) {
+						if (img.data[i * 4 + 3] === 0) continue;
+						painted++;
+						if (!used[i]) unused++;
+					}
+					report.unused_pixels = (report.unused_pixels || 0) + unused;
+					if (painted && unused / painted > 0.02) {
+						report.warnings.push(`${Math.round(unused / painted * 100)}% of the painted pixels in texture ${t + 1} are not on any face of this model. If another model shares this texture, repacking drops its part: use "keep untouched UVs" instead.`);
 					}
 				}
 			}
@@ -4250,7 +4282,7 @@
 		}
 
 		let session = null;   // the open BlockPatcher run, see runBlockPatcher
-		let bpPanel, bpAction, markerTool, bpStyle;
+		let bpPanel, bpAction, uvAction, markerTool, bpStyle;
 		const bpListeners = [];
 
 		/* images in and out of Blockbench */
@@ -4282,9 +4314,18 @@
 		}
 
 		/** Patch the session's snapshot and show the result in the preview tab. */
-		async function buildPreview() {
+		async function buildPreview(keepMarks = true) {
 			const s = session;
+			// remember where the marked parts are, to mark the same parts again after the rebuild
+			const markedBoxes = [];
+			if (keepMarks && s.result) {
+				for (const id of s.marked) {
+					const el = s.result.model.elements.find(e => e.uuid === id);
+					if (el) markedBoxes.push({ from: el.from.slice(), to: el.to.slice() });
+				}
+			}
 			const settings = Object.assign({}, bpSettings, patchNames());
+			if (s.uvOnly) Object.assign(settings, { uv_only: true, cull_hidden: !!bpSettings.uv_cull });
 			s.result = blockPatch(s.snapshot, s.images, { settings, excluded: s.excluded, frozen: s.frozen });
 			const model = JSON.parse(JSON.stringify(Object.assign({}, s.result.model, { textures: undefined, animations: undefined })));
 			model.textures = s.snapshot.textures.map((t, i) => {
@@ -4314,10 +4355,20 @@
 			}
 			Codecs.project.load(model, { path: 'BlockPatcher preview.bbmodel', no_file: true });
 			s.preview = Project;
-			Project.name = (s.og.name || 'model') + ' · BlockPatcher';
+			Project.name = (s.og.name || 'model') + (s.uvOnly ? ' · Organize UV' : ' · BlockPatcher');
 			Project.block_patcher_preview = true;
 			Project.saved = true;
 			s.marked = new Set();
+			if (markedBoxes.length) {
+				const same = (a, b) => [0, 1, 2].every(i => Math.abs(a.from[i] - b.from[i]) < 1e-6 && Math.abs(a.to[i] - b.to[i]) < 1e-6);
+				const inside = (a, b) => [0, 1, 2].every(i => a.from[i] >= b.from[i] - 1e-6 && a.to[i] <= b.to[i] + 1e-6);
+				for (const el of s.result.model.elements) {
+					if (!el.from || !s.result.provenance[el.uuid]) continue;
+					// the same cube, or a piece of a marked cube (merging can change how a part is split up)
+					if (markedBoxes.some(m => same(el, m) || inside(el, m) || inside(m, el))) s.marked.add(el.uuid);
+				}
+			}
+			drawMarks();
 			s.lastIds = new Set(Outliner.elements.map(e => e.uuid));
 			if (cam && Preview.selected) {
 				Preview.selected.camera.position.copy(cam.pos);
@@ -4328,11 +4379,11 @@
 			syncBpPanel();
 		}
 
-		async function runBlockPatcher() {
+		async function runBlockPatcher(uvOnly = false) {
 			if (!Project) return;
 			if (session && session.preview && ModelProject.all.includes(session.preview)) {
 				session.preview.select();
-				Blockbench.showQuickMessage('BlockPatcher preview is already open', 1500);
+				Blockbench.showQuickMessage((session.uvOnly ? 'Organize UV' : 'BlockPatcher') + ' preview is already open', 1500);
 				return;
 			}
 			if (Project.block_patcher_preview) return;
@@ -4344,7 +4395,7 @@
 				Blockbench.showMessageBox({ title: 'BlockPatcher', message: 'This model has no texture yet. BlockPatcher needs one to paint walls and lay out UVs.' });
 				return;
 			}
-			session = { og, snapshot, images, excluded: new Set(), frozen: new Set(), restoreLog: [], marked: new Set(), preview: null, result: null };
+			session = { uvOnly: !!uvOnly, og, snapshot, images, excluded: new Set(), frozen: new Set(), restoreLog: [], marked: new Set(), preview: null, result: null };
 			Blockbench.showQuickMessage('BlockPatcher…', 600);
 			await new Promise(r => setTimeout(r, 20));
 			try {
@@ -4357,7 +4408,7 @@
 				return;
 			}
 			const r = session.result.report;
-			if (!session.result.ops.length) {
+			if (!uvOnly && !session.result.ops.length) {
 				Blockbench.showQuickMessage('No ADD, CUTOUT or HOLLOW cubes found: only merged, cleaned up and laid out UVs', 3000);
 			}
 		}
@@ -4386,25 +4437,25 @@
 				Blockbench.showQuickMessage('Mark parts with the BlockPatcher Marker first (or select them)', 2000);
 				return;
 			}
-			const editsBefore = Undo.history.length - (fromDelete ? 1 : 0);
+			const editsBefore = Undo.index;
 			if (editsBefore > 0 && !(await confirmLoseEdits())) return;
 			const n = restore(ids);
 			if (!n) { Blockbench.showQuickMessage('Those parts were not changed by BlockPatcher', 2000); return; }
-			await buildPreview();
+			await buildPreview(false);
 			Blockbench.showQuickMessage(`Restored ${n} part${n === 1 ? '' : 's'}`, 1500);
 		}
-		function confirmLoseEdits() {
+		function confirmLoseEdits(message) {
 			return new Promise(resolve => {
 				Blockbench.showMessageBox({
 					title: 'BlockPatcher',
-					message: 'This rebuilds the preview from your model, so changes you made by hand in the preview are lost. Continue?',
+					message: message || 'This rebuilds the preview from your model, so changes you made by hand in the preview are lost. Continue?',
 					buttons: ['Rebuild', 'Cancel']
 				}, answer => resolve(answer === 0));
 			});
 		}
 		async function rerun() {
 			if (!session) return;
-			if (Undo.history.length > 0 && !(await confirmLoseEdits())) return;
+			if (Undo.index > 0 && !(await confirmLoseEdits())) return;
 			await buildPreview();
 		}
 
@@ -4417,6 +4468,14 @@
 				return;
 			}
 			s.preview.select();
+			if (s.marked.size) {
+				// the marked parts go back to how they were, then the rest is applied
+				if (Undo.index > 0 && !(await confirmLoseEdits('Your marked parts are restored by rebuilding the preview from your model, so changes you made by hand in the preview are lost. Continue?'))) return;
+				const n = restore(s.marked);
+				await buildPreview(false);
+				s.preview.select();
+				if (n) Blockbench.showQuickMessage(`Restored ${n} marked part${n === 1 ? '' : 's'}`, 1500);
+			}
 			const model = Codecs.project.compile({ raw: true, bitmaps: false });
 			const urls = Texture.all.map(t => t.getDataURL());
 			s.rebuilding = true;
@@ -4461,9 +4520,9 @@
 			});
 			await Promise.all(waits);
 			Canvas.updateAll();
-			Undo.finishEdit('BlockPatcher', { elements: added, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
+			Undo.finishEdit(s.uvOnly ? 'Organize UV' : 'BlockPatcher', { elements: added, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
 			updateInterfacePanels();
-			Blockbench.showQuickMessage(`BlockPatcher applied: ${oldCubes.length} → ${added.length} cubes`, 2500);
+			Blockbench.showQuickMessage(s.uvOnly ? 'UV organized' : `BlockPatcher applied: ${oldCubes.length} → ${added.length} cubes`, 2500);
 		}
 		async function cancelPatch() {
 			const s = session;
@@ -4518,8 +4577,18 @@
 			const now = new Set(Outliner.elements.map(e => e.uuid));
 			const gone = [...s.lastIds].filter(id => !now.has(id) && s.result.provenance[id] && s.result.provenance[id].ops.length);
 			s.lastIds = now;
-			if (gone.length) setTimeout(() => restoreMarked(gone), 0);
-			else syncBpPanel();
+			if (!gone.length) { syncBpPanel(); return; }
+			// deleting a patched part marks it instead: the delete is undone, and Confirm restores it
+			setTimeout(() => {
+				if (session !== s || Project !== s.preview) return;
+				s.rebuilding = true;
+				try { Undo.undo(); } finally { s.rebuilding = false; }
+				s.lastIds = new Set(Outliner.elements.map(e => e.uuid));
+				for (const id of gone) s.marked.add(id);
+				drawMarks();
+				syncBpPanel();
+				Blockbench.showQuickMessage(`Marked ${gone.length} part${gone.length === 1 ? '' : 's'} to restore on Confirm`, 1800);
+			}, 0);
 		}
 
 		/* --- panel --- */
@@ -4540,6 +4609,7 @@
 			v.marked = s.marked.size;
 			v.restored = s.excluded.size + s.frozen.size;
 			v.settings = Object.assign({}, bpSettings);
+			v.uv_only = !!s.uvOnly;
 			v.marker_on = !!(markerTool && Toolbox.selected === markerTool);
 		}
 		function createBpPanel() {
@@ -4553,7 +4623,7 @@
 				default_position: { slot: 'right_bar', float_position: [0, 0], float_size: [320, 640], height: 640 },
 				component: {
 					data() {
-						return { active: false, report: {}, ops: [], marked: 0, restored: 0, settings: Object.assign({}, bpSettings), marker_on: false };
+						return { active: false, uv_only: false, report: {}, ops: [], marked: 0, restored: 0, settings: Object.assign({}, bpSettings), marker_on: false };
 					},
 					methods: {
 						confirm() { confirmPatch(); },
@@ -4586,6 +4656,7 @@
 							updateSelection();
 						},
 						set(key, value) {
+							if (key === 'cull_hidden' && session && session.uvOnly) key = 'uv_cull';
 							bpSettings[key] = value;
 							saveBpSettings();
 							rerun();
@@ -4593,9 +4664,10 @@
 					},
 					template: `
 						<div class="bp_panel">
+							<div class="bp_title" v-if="active">{{ uv_only ? 'Organize UV' : 'BlockPatcher' }}</div>
 							<template v-if="active">
 								<div class="bp_actions">
-									<div class="bp_button bp_primary" @click="confirm()" title="Close the preview and put this into your model (one undo step)"><i class="material-icons">check</i><span>Confirm</span></div>
+									<div class="bp_button bp_primary" @click="confirm()" :title="marked ? 'Restore the marked parts, then close the preview and put the rest into your model (one undo step)' : 'Close the preview and put this into your model (one undo step)'"><i class="material-icons">check</i><span>Confirm<template v-if="marked">, restoring {{ marked }}</template></span></div>
 									<div class="bp_button" @click="cancel()" title="Close the preview, your model stays as it was"><i class="material-icons">close</i><span>Cancel</span></div>
 								</div>
 
@@ -4608,12 +4680,13 @@
 								</div>
 								<div class="bp_warning" v-for="w in report.warnings">{{ w }}</div>
 
+								<template v-if="!uv_only">
 								<label>Fix what went wrong</label>
 								<div class="bp_actions">
 									<div class="bp_button" :class="{selected: marker_on}" @click="marker()" title="Click parts in the preview that came out wrong"><i class="material-icons" style="color:#ff2d55">ads_click</i><span>Marker</span></div>
-									<div class="bp_button" @click="restoreMarked()" title="Put the marked (or selected) parts back the way they were before BlockPatcher"><i class="material-icons">restore</i><span>Restore {{ marked || 'selected' }}</span></div>
+									<div class="bp_button" @click="restoreMarked()" title="Restore the marked (or selected) parts right away, to see the result before confirming"><i class="material-icons">restore</i><span>Restore {{ marked ? 'now' : 'selected' }}</span></div>
 								</div>
-								<p class="bp_hint">Mark parts with the Marker, or select them, then Restore. Deleting a patched part restores it too. <a v-if="marked" @click="clearMarks()">Clear marks</a> <a v-if="restored" @click="resetRestores()">Undo all restores</a></p>
+								<p class="bp_hint">Click parts that came out wrong with the Marker, or delete them: they get a red box{{ marked ? ' (' + marked + ' marked)' : '' }}, and Confirm puts them back the way they were. <a v-if="marked" @click="clearMarks()">Clear marks</a> <a v-if="restored" @click="resetRestores()">Undo all restores</a></p>
 
 								<label>Patch cubes <span class="bp_subtle">untick to skip one</span></label>
 								<div class="bp_ops">
@@ -4625,12 +4698,14 @@
 									</div>
 									<p class="bp_hint" v-if="!ops.length">No ADD, CUTOUT or HOLLOW cubes in this model.</p>
 								</div>
+								</template>
+								<p class="bp_hint" v-else>Only the UV is laid out again: every face keeps its pixels, and the geometry stays as it is.</p>
 
 								<label>Settings</label>
-								<div class="bp_row" title="How bright new inner walls are, compared with the surface they are cut into">
+								<div class="bp_row" v-if="!uv_only" title="How bright new inner walls are, compared with the surface they are cut into">
 									<span>Wall shade</span><input type="range" min="20" max="100" :value="settings.wall_shade" @change="set('wall_shade', Number($event.target.value))"><span class="bp_subtle">{{ settings.wall_shade }}%</span>
 								</div>
-								<div class="bp_row">
+								<div class="bp_row" v-if="!uv_only">
 									<span>Merge</span>
 									<select :value="settings.merge" @change="set('merge', $event.target.value)">
 										<option value="all">all cubes that form one box</option>
@@ -4646,8 +4721,8 @@
 									</select>
 								</div>
 								<div class="bp_row"><span>Padding</span><input type="number" min="0" max="8" :value="settings.padding" @change="set('padding', Number($event.target.value))"><span class="bp_subtle">px between faces</span></div>
-								<div class="bp_row"><input type="checkbox" :checked="settings.cull_hidden" @change="set('cull_hidden', $event.target.checked)"><span>Drop faces nobody can see</span></div>
-								<div class="bp_row"><input type="checkbox" :checked="settings.retexture_add" @change="set('retexture_add', $event.target.checked)"><span>Paint ADD cubes like what they attach to</span></div>
+								<div class="bp_row"><input type="checkbox" :checked="uv_only ? settings.uv_cull : settings.cull_hidden" @change="set('cull_hidden', $event.target.checked)"><span>Drop faces nobody can see</span></div>
+								<div class="bp_row" v-if="!uv_only"><input type="checkbox" :checked="settings.retexture_add" @change="set('retexture_add', $event.target.checked)"><span>Paint ADD cubes like what they attach to</span></div>
 							</template>
 						</div>
 					`
@@ -4662,6 +4737,8 @@
 					.panel_handle[panel_id="block_patcher_panel"] .icon { color: ${BP_COLOR} !important; }
 					[toolbar_item="block_patcher_marker"] .icon, [menu_item="block_patcher_marker"] > .icon { color: #ff2d55 !important; }
 					.bp_panel { padding: 4px 8px 8px; }
+					.bp_title { font-weight: bold; margin-bottom: 4px; }
+					[menu_item="organize_uv"] > .icon { color: ${BP_COLOR} !important; }
 					.bp_panel > label { display: block; margin: 10px 0 4px; color: var(--color-subtle_text); }
 					.bp_subtle { color: var(--color-subtle_text); font-size: 0.85em; }
 					.bp_actions { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -4692,6 +4769,15 @@
 					click: runBlockPatcher
 				});
 				MenuBar.addAction(bpAction, 'tools');
+				uvAction = new Action('organize_uv', {
+					name: 'Organize UV',
+					description: 'Lay out the whole UV again, bone by bone, without changing the model, in a preview tab you confirm',
+					icon: 'dashboard',
+					condition: () => Project && !Project.block_patcher_preview && Format && Format.id !== 'image',
+					click: () => runBlockPatcher(true)
+				});
+				MenuBar.addAction(uvAction, 'tools');
+				try { MenuBar.addAction(uvAction, 'uv'); } catch (e) {}
 				markerTool = new Tool('block_patcher_marker', {
 					name: 'BlockPatcher Marker',
 					description: 'Click parts of the BlockPatcher preview that came out wrong, then Restore them in the BlockPatcher panel',
@@ -4720,6 +4806,7 @@
 				createBpPanel();
 				bpListeners.push(Blockbench.on('finished_edit', onPreviewEdit));
 				bpListeners.push(Blockbench.on('select_project', () => { drawMarks(); syncBpPanel(); }));
+				for (const ev of ['undo', 'redo']) bpListeners.push(Blockbench.on(ev, () => setTimeout(() => { if (session && Project === session.preview) { session.lastIds = new Set(Outliner.elements.map(e => e.uuid)); drawMarks(); } }, 0)));
 				bpListeners.push(Blockbench.on('close_project', data => {
 					if (!session || session.rebuilding) return;
 					const p = data && data.project;
@@ -4735,6 +4822,7 @@
 				if (bpPanel) bpPanel.delete();
 				if (markerTool) markerTool.delete();
 				if (bpAction) bpAction.delete();
+				if (uvAction) uvAction.delete();
 				if (bpStyle && bpStyle.delete) bpStyle.delete();
 				session = null;
 			}
@@ -4750,7 +4838,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.7.0',
+		version: '1.8.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

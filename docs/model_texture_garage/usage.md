@@ -262,13 +262,15 @@ Cubes in a rotated bone, or rotated themselves, only work with cubes turned the 
 
 ### Fixing what went wrong
 
-- Pick the `BlockPatcher Marker` (the button in the panel, or the toolbox) and click parts of the preview that came out wrong. They get a red outline. Click again to unmark.
-- `Restore` puts the marked parts back the way they were before BlockPatcher: the `ADD`, `CUTOUT` or `HOLLOW` cubes that made them are skipped and stay in the model as they are, and the cubes they touched are kept unchanged. With nothing marked, it restores the selected cubes.
-- Deleting a part of the preview that BlockPatcher changed restores it too.
+- Pick the `BlockPatcher Marker` (the button in the panel, or the toolbox) and click parts of the preview that came out wrong. They get a red box. Click again to unmark.
+- Deleting a part of the preview that BlockPatcher changed marks it too: the delete is undone and the part gets a red box.
+- `Confirm` puts the marked parts back the way they were before BlockPatcher, then applies the rest. The button shows how many parts it restores. The `ADD`, `CUTOUT` or `HOLLOW` cubes that made a marked part are skipped and stay in the model as they are, and the cubes they touched are kept unchanged.
+- `Restore now` does the same straight away, so you can see the result before confirming. With nothing marked, it restores the selected cubes.
+- Marks stay when you change a setting.
 - The `Patch cubes` list shows every `ADD`, `CUTOUT` and `HOLLOW` cube, which cube it works on, and `no effect` when it touches nothing. Untick one to skip it, tick it again to bring it back. Click its name to select what it made.
 - `Undo all restores` brings back everything you restored.
 
-Restoring and changing settings rebuild the preview from your model, so changes made by hand in the preview are lost then (BlockPatcher asks first). Hand edits made after the last rebuild are kept when you confirm.
+Restoring (also on `Confirm` with marked parts) and changing settings rebuild the preview from your model, so changes made by hand in the preview are lost then (BlockPatcher asks first). Hand edits are kept when you confirm with nothing marked.
 
 ### Settings
 
@@ -280,6 +282,14 @@ Restoring and changing settings rebuild the preview from your model, so changes 
 - `Paint ADD cubes like what they attach to`: on by default; off keeps the ADD cube's own texture.
 
 The names BlockPatcher looks for are the ones set in the Block Grid Cube panel.
+
+If the texture has painted pixels that no face of the model uses, the panel warns you: they may belong to another model that shares the texture, and repacking everything drops them. Use `keep untouched UVs` for such a model.
+
+## Organize UV
+
+`Tools -> Organize UV` (also in the UV menu) lays out the whole UV again without changing the model: no cubes are added, cut, merged or removed, and `ADD`, `CUTOUT` and `HOLLOW` cubes are left alone. Every face keeps its pixels and moves to a new place in a tighter texture, bone by bone, with each cube's faces side by side.
+
+It opens in a preview tab like BlockPatcher, with the same `Confirm` and `Cancel`, and `UV`, `Padding` and `Drop faces nobody can see` (off by default here) as settings.
 
 ```{note}
 Repacking moves pixels in the texture. Anything else laid out on the same UV, such as a height map or a normal map painted to match the texture, does not move with it. Use `keep untouched UVs` for models like that, or redo those maps afterwards.
