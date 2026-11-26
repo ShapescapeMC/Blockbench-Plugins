@@ -3295,10 +3295,24 @@
 
 		/* --- right-click: delete the cube under the cursor --- */
 
+		/** The placed ADD, CUTOUT or HOLLOW cube nearest the camera along a click, or null. */
+		function patchCubeAt(data) {
+			if (!data || !data.intersects) return null;
+			const names = { add: nameFor('add'), cutout: nameFor('cutout'), hollow: nameFor('hollow') };
+			for (const intersect of data.intersects) {
+				const obj = intersect.object;
+				const cube = obj && obj.isElement ? OutlinerNode.uuids[obj.name] : null;
+				if (cube instanceof Cube && modeOfName(cube.name, names)) return cube;
+			}
+			return null;
+		}
+
 		/**
-		 * A right-click (not a right-drag, which still pans the view) deletes the
-		 * cube under the cursor while the tool is in hand, instead of opening the
-		 * menu. Caught on the way down to the 3D view, before Blockbench sees it.
+		 * A right-click (not a right-drag, which still pans the view) on a placed
+		 * ADD, CUTOUT or HOLLOW cube deletes it while the tool is in hand, instead
+		 * of opening the menu. Other cubes are never deleted this way: there the
+		 * menu opens as usual. The mouse-up itself goes on to Blockbench, so the
+		 * view's controls see the button come up and nothing stays held.
 		 */
 		function onRightUp(event) {
 			if (event.button !== 2 || !settings.right_click_delete || !tool || Toolbox.selected !== tool) return;
@@ -3306,20 +3320,28 @@
 			if (!t || t.tagName !== 'CANVAS' || !t.closest || !t.closest('.preview')) return;
 			const view = (Preview.all || []).find(p => p.canvas === t) || Preview.selected;
 			if (!view || !view.static_rclick) return; // the mouse moved: that was a pan
-			const hit = hitOnCube(view.raycast(event));
-			if (!hit) return;
-			event.preventDefault();
-			event.stopImmediatePropagation();
+			const cube = patchCubeAt(view.raycast(event));
+			if (!cube) return;
+			// no menu for this click; everything else about the mouse-up happens as normal
 			view.static_rclick = false;
-			const cube = hit.cube;
-			Undo.initEdit({ elements: [cube], outliner: true, selection: true });
-			cube.remove();
-			Undo.finishEdit('Delete cube', { elements: [], outliner: true, selection: true });
-			clearPreview();
-			lastHover = null;
-			queueOverlay();
-			syncPanel();
-			Blockbench.showQuickMessage('Deleted ' + cube.name, 800);
+			event.preventDefault();
+			setTimeout(() => {
+				if (!cube.parent && !Outliner.elements.includes(cube)) return;
+				Undo.initEdit({ elements: [cube], outliner: true, selection: true });
+				cube.remove();
+				Undo.finishEdit('Delete ' + cube.name + ' cube', { elements: [], outliner: true, selection: true });
+				clearPreview();
+				lastHover = null;
+				queueOverlay();
+				syncPanel();
+				Blockbench.showQuickMessage('Deleted ' + cube.name, 800);
+			}, 0);
+		}
+		// no browser menu either, after a right-click that deleted a cube
+		function onContextMenu(event) {
+			if (!tool || Toolbox.selected !== tool) return;
+			const t = event.target;
+			if (t && t.tagName === 'CANVAS' && t.closest && t.closest('.preview')) event.preventDefault();
 		}
 
 		/* --- Ctrl + mouse wheel: size --- */
@@ -3509,9 +3531,9 @@
 								<input type="checkbox" :checked="drag_draw" @change="setDrag($event.target.checked)">
 								<span>Hold to draw a line of cubes</span>
 							</div>
-							<div class="bgc_row" title="Right-click a cube (without dragging) to delete it. Right-drag still pans the view.">
+							<div class="bgc_row" title="Right-click an ADD, CUTOUT or HOLLOW cube (without dragging) to delete it. Other cubes are never deleted this way. Right-drag still pans the view.">
 								<input type="checkbox" :checked="right_click_delete" @change="setRightDelete($event.target.checked)">
-								<span>Right-click deletes the cube under the cursor</span>
+								<span>Right-click deletes placed ADD, CUTOUT and HOLLOW cubes</span>
 							</div>
 							<div class="bgc_row" title="A see-through box in each mode's colour over placed cubes, drawn on top of the model, so cut-out and hollow cubes inside it stay easy to find">
 								<span>Show placed cubes</span>
@@ -3611,7 +3633,7 @@
 
 				tool = new Tool('block_grid_cube', {
 					name: 'Block Grid Cube',
-					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out, Ctrl + mouse wheel changes the size, right-click deletes a cube',
+					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out, Ctrl + mouse wheel changes the size, right-click deletes a placed ADD, CUTOUT or HOLLOW cube',
 					icon: 'view_in_ar',
 					category: 'tools',
 					toolbar: 'block_grid_cube',
@@ -3652,6 +3674,7 @@
 				window.addEventListener('keydown', onKeyDown, true);
 				window.addEventListener('wheel', onWheel, { capture: true, passive: false });
 				window.addEventListener('mouseup', onRightUp, true);
+				window.addEventListener('contextmenu', onContextMenu, true);
 				for (const event of ['finished_edit', 'undo', 'redo', 'select_project']) {
 					listeners.push(Blockbench.on(event, syncPanel));
 				}
@@ -3671,6 +3694,7 @@
 				window.removeEventListener('keydown', onKeyDown, true);
 				window.removeEventListener('wheel', onWheel, { capture: true });
 				window.removeEventListener('mouseup', onRightUp, true);
+				window.removeEventListener('contextmenu', onContextMenu, true);
 				window.removeEventListener('mouseup', endStroke, true);
 				stroke = null;
 				listeners.forEach(l => l && l.delete && l.delete());
@@ -5408,7 +5432,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.12.0',
+		version: '1.12.1',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

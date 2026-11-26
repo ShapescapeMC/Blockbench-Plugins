@@ -217,7 +217,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
 - `Hold to draw a line of cubes`: on by default, see above.
-- `Right-click deletes the cube under the cursor`: on by default. A right-click on a cube deletes it (one undo step) instead of opening the menu; a right-drag still pans the view.
+- `Right-click deletes placed ADD, CUTOUT and HOLLOW cubes`: on by default. A right-click on one of those deletes it (one undo step) instead of opening the menu, also when it sits inside the model where the overlay shows it. Other cubes are never deleted this way: right-clicking them opens the menu as usual. A right-drag still pans the view.
 - `Show placed cubes`: a see-through box in the mode's colour (green, red, blue) over every `ADD`, `CUTOUT` and `HOLLOW` cube, drawn on top of the model, so cubes placed inside it stay easy to find. `always` (the default), `while placing` (only with the tool in hand) or `off`. Not shown in the BlockPatcher preview.
 
 The mode and the standard sizes are also in the tool bar at the top, and the names and inflate under `Tools -> Block Grid Cube Settings`.
