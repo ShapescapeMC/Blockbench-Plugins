@@ -20,6 +20,7 @@
  *   see-through hollows), merges cubes, drops hidden faces and lays out the
  *   UV, in a preview tab where you can restore what went wrong, then confirm.
  * - Organize UV: lays out the UV again without touching the geometry.
+ * - Simplify Model: merges cubes and drops hidden faces, nothing else.
  *
  * Alt picks a colour with every brush, as with the normal brush. Presets
  * live in the "edge_noise_presets" folder in Blockbench's user data folder.
@@ -2753,6 +2754,7 @@
 			cutout_inflate: 0.025,  // how much cut-out and hollow cubes are inflated
 			x_toggles: true,        // X switches between Add and Cut out while the tool is held
 			drag_draw: true,        // hold the mouse and drag to place a line of cubes
+			right_click_delete: true, // right-click (without dragging) deletes the cube under the cursor
 			overlay: 'always'       // coloured boxes on placed ADD / CUTOUT / HOLLOW cubes: 'always', 'tool' (while placing) or 'off'
 		};
 		const STORAGE_KEY = 'block_grid_modeler_settings';
@@ -3291,6 +3293,35 @@
 			syncPanel();
 		}
 
+		/* --- right-click: delete the cube under the cursor --- */
+
+		/**
+		 * A right-click (not a right-drag, which still pans the view) deletes the
+		 * cube under the cursor while the tool is in hand, instead of opening the
+		 * menu. Caught on the way down to the 3D view, before Blockbench sees it.
+		 */
+		function onRightUp(event) {
+			if (event.button !== 2 || !settings.right_click_delete || !tool || Toolbox.selected !== tool) return;
+			const t = event.target;
+			if (!t || t.tagName !== 'CANVAS' || !t.closest || !t.closest('.preview')) return;
+			const view = (Preview.all || []).find(p => p.canvas === t) || Preview.selected;
+			if (!view || !view.static_rclick) return; // the mouse moved: that was a pan
+			const hit = hitOnCube(view.raycast(event));
+			if (!hit) return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			view.static_rclick = false;
+			const cube = hit.cube;
+			Undo.initEdit({ elements: [cube], outliner: true, selection: true });
+			cube.remove();
+			Undo.finishEdit('Delete cube', { elements: [], outliner: true, selection: true });
+			clearPreview();
+			lastHover = null;
+			queueOverlay();
+			syncPanel();
+			Blockbench.showQuickMessage('Deleted ' + cube.name, 800);
+		}
+
 		/* --- Ctrl + mouse wheel: size --- */
 
 		let wheelBuffer = 0, wheelTime = 0;
@@ -3349,6 +3380,7 @@
 			vue.x_toggles = settings.x_toggles;
 			vue.drag_draw = settings.drag_draw;
 			vue.overlay = settings.overlay || 'always';
+			vue.right_click_delete = settings.right_click_delete !== false;
 			try { vue.counts = countByName(); } catch (e) {}
 		}
 
@@ -3382,6 +3414,7 @@
 							x_toggles: settings.x_toggles,
 							drag_draw: settings.drag_draw,
 							overlay: settings.overlay || 'always',
+							right_click_delete: settings.right_click_delete !== false,
 							counts: { add: 0, cutout: 0, hollow: 0 }
 						};
 					},
@@ -3394,6 +3427,7 @@
 						setAxisSize(key, size) { setAxisSize(key, size); },
 						setSeparate(on) { setSeparate(on); },
 						setOverlay(value) { setOverlay(value); },
+						setRightDelete(value) { settings.right_click_delete = !!value; saveSettings(); syncPanel(); },
 						setGrid(value) { setGrid(value); },
 						setName(mode, value) {
 							settings[mode + '_name'] = String(value || DEFAULTS[mode + '_name']).toUpperCase().trim() || DEFAULTS[mode + '_name'];
@@ -3474,6 +3508,10 @@
 							<div class="bgc_row" title="Hold the mouse and drag across faces to place a line of cubes on the same layer as the first one.">
 								<input type="checkbox" :checked="drag_draw" @change="setDrag($event.target.checked)">
 								<span>Hold to draw a line of cubes</span>
+							</div>
+							<div class="bgc_row" title="Right-click a cube (without dragging) to delete it. Right-drag still pans the view.">
+								<input type="checkbox" :checked="right_click_delete" @change="setRightDelete($event.target.checked)">
+								<span>Right-click deletes the cube under the cursor</span>
 							</div>
 							<div class="bgc_row" title="A see-through box in each mode's colour over placed cubes, drawn on top of the model, so cut-out and hollow cubes inside it stay easy to find">
 								<span>Show placed cubes</span>
@@ -3573,7 +3611,7 @@
 
 				tool = new Tool('block_grid_cube', {
 					name: 'Block Grid Cube',
-					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out, Ctrl + mouse wheel changes the size',
+					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out, Ctrl + mouse wheel changes the size, right-click deletes a cube',
 					icon: 'view_in_ar',
 					category: 'tools',
 					toolbar: 'block_grid_cube',
@@ -3613,6 +3651,7 @@
 				createPanel();
 				window.addEventListener('keydown', onKeyDown, true);
 				window.addEventListener('wheel', onWheel, { capture: true, passive: false });
+				window.addEventListener('mouseup', onRightUp, true);
 				for (const event of ['finished_edit', 'undo', 'redo', 'select_project']) {
 					listeners.push(Blockbench.on(event, syncPanel));
 				}
@@ -3631,6 +3670,7 @@
 			onunload() {
 				window.removeEventListener('keydown', onKeyDown, true);
 				window.removeEventListener('wheel', onWheel, { capture: true });
+				window.removeEventListener('mouseup', onRightUp, true);
 				window.removeEventListener('mouseup', endStroke, true);
 				stroke = null;
 				listeners.forEach(l => l && l.delete && l.delete());
@@ -3673,6 +3713,7 @@
 			uv_mode: 'all',          // 'all' repack everything by group | 'changed' keep untouched faces where they are
 			padding: 0,              // pixels between packed faces
 			uv_cull: false,          // Organize UV: drop hidden faces too
+			ignore_patches: false,   // Simplify Model: ADD, CUTOUT and HOLLOW cubes are left as plain cubes
 			uv_only: false,          // Organize UV: leave geometry alone, only lay out the UV (and drop hidden faces if cull_hidden)
 		};
 
@@ -4032,6 +4073,7 @@
 			const s = Object.assign({}, BP_DEFAULTS, opts.settings || {});
 			const excluded = opts.excluded || new Set();
 			const frozen = opts.frozen || new Set();
+			const dropped = opts.dropped || new Set();   // patch cubes to take out of the model altogether (restored parts)
 			const shade = Math.max(0, Math.min(100, s.wall_shade)) / 100;
 			const res = model.resolution || { width: 16, height: 16 };
 			const scale = tex => {
@@ -4063,7 +4105,12 @@
 				if (el.type && el.type !== 'cube') { others.push(el); continue; }
 				if (!el.from || !el.to) { others.push(el); continue; }
 				report.cubes_before++;
-				const kind = s.uv_only ? null : patchKind(el.name, s);
+				const kind = (s.uv_only || s.ignore_patches) ? null : patchKind(el.name, s);
+				if (kind && dropped.has(el.uuid)) {
+					// a restored part: its placeholder cube goes, the model stays as it was there
+					ops.push({ uuid: el.uuid, kind, name: el.name, status: 'removed', host: null });
+					continue;
+				}
 				const box = {
 					uuid: el.uuid, el, from: el.from.slice(), to: el.to.slice(), name: el.name,
 					group: parent[el.uuid] || null, frame: frameKey(el), kind,
@@ -4678,7 +4725,7 @@
 		}
 
 		let session = null;   // the open BlockPatcher run, see runBlockPatcher
-		let bpPanel, bpAction, uvAction, markerTool, bpStyle;
+		let bpPanel, bpAction, uvAction, simplifyAction, markerTool, bpStyle;
 		const bpListeners = [];
 
 		/* images in and out of Blockbench */
@@ -4709,6 +4756,24 @@
 			});
 		}
 
+		/** Where the 3D view looks from and at, and how far it is zoomed. */
+		function grabCamera() {
+			const p = Preview.selected;
+			if (!p || !p.camera || !p.controls) return null;
+			return { pos: p.camera.position.clone(), target: p.controls.target.clone(), zoom: p.camera.zoom, ortho: !!p.isOrtho };
+		}
+		function putCamera(cam) {
+			const p = Preview.selected;
+			if (!cam || !p || !p.camera || !p.controls) return;
+			if (!!p.isOrtho !== cam.ortho && typeof p.setProjectionMode === 'function') {
+				try { p.setProjectionMode(cam.ortho); } catch (e) {}
+			}
+			p.camera.position.copy(cam.pos);
+			p.controls.target.copy(cam.target);
+			if (cam.zoom && p.camera.zoom !== undefined) { p.camera.zoom = cam.zoom; p.camera.updateProjectionMatrix(); }
+			p.controls.update();
+		}
+
 		/** Patch the session's snapshot and show the result in the preview tab. */
 		async function buildPreview(keepMarks = true) {
 			const s = session;
@@ -4722,7 +4787,8 @@
 			}
 			const settings = Object.assign({}, bpSettings, patchNames());
 			if (s.uvOnly) Object.assign(settings, { uv_only: true, cull_hidden: !!bpSettings.uv_cull });
-			s.result = blockPatch(s.snapshot, s.images, { settings, excluded: s.excluded, frozen: s.frozen });
+			if (s.simplify) Object.assign(settings, { ignore_patches: true, merge: 'all', uv_mode: bpSettings.simplify_uv || 'changed' });
+			s.result = blockPatch(s.snapshot, s.images, { settings, excluded: s.excluded, frozen: s.frozen, dropped: s.dropped });
 			const model = JSON.parse(JSON.stringify(Object.assign({}, s.result.model, { textures: undefined, animations: undefined })));
 			model.textures = s.snapshot.textures.map((t, i) => {
 				const copy = Object.assign({}, t);
@@ -4739,11 +4805,8 @@
 			delete model.history;
 			model.animations = [];
 
-			// keep the camera where it was when the preview is rebuilt
-			let cam = null;
-			if (s.preview && Preview.selected) {
-				cam = { pos: Preview.selected.camera.position.clone(), target: Preview.selected.controls.target.clone() };
-			}
+			// keep the view: the one of your model when the preview opens, the preview's own when it is rebuilt
+			const cam = (s.preview && Project === s.preview) ? grabCamera() : (s.cam || null);
 			if (s.preview && ModelProject.all.includes(s.preview)) {
 				s.rebuilding = true;
 				await s.preview.close(true);
@@ -4751,7 +4814,7 @@
 			}
 			Codecs.project.load(model, { path: 'BlockPatcher preview.bbmodel', no_file: true });
 			s.preview = Project;
-			Project.name = (s.og.name || 'model') + (s.uvOnly ? ' · Organize UV' : ' · BlockPatcher');
+			Project.name = (s.og.name || 'model') + ' · ' + sessionTitle(s);
 			Project.block_patcher_preview = true;
 			Project.saved = true;
 			s.marked = new Set();
@@ -4766,20 +4829,24 @@
 			}
 			drawMarks();
 			s.lastIds = new Set(Outliner.elements.map(e => e.uuid));
-			if (cam && Preview.selected) {
-				Preview.selected.camera.position.copy(cam.pos);
-				Preview.selected.controls.target.copy(cam.target);
-			}
 			if (Modes.options.edit && !Modes.edit) Modes.options.edit.select();
+			putCamera(cam);
+			// Blockbench may still reset the view of a new tab once it has settled: put it back again
+			setTimeout(() => { if (session === s && Project === s.preview) putCamera(cam); }, 60);
 			updateInterfacePanels();
 			syncBpPanel();
 		}
 
-		async function runBlockPatcher(uvOnly = false) {
+		function sessionTitle(s) { return s.uvOnly ? 'Organize UV' : s.simplify ? 'Simplify Model' : 'BlockPatcher'; }
+
+		/** mode: 'patch' (BlockPatcher), 'uv' (Organize UV) or 'simplify' (Simplify Model). */
+		async function runBlockPatcher(mode = 'patch') {
+			const uvOnly = mode === 'uv' || mode === true;
+			const simplify = mode === 'simplify';
 			if (!Project) return;
 			if (session && session.preview && ModelProject.all.includes(session.preview)) {
 				session.preview.select();
-				Blockbench.showQuickMessage((session.uvOnly ? 'Organize UV' : 'BlockPatcher') + ' preview is already open', 1500);
+				Blockbench.showQuickMessage(sessionTitle(session) + ' preview is already open', 1500);
 				return;
 			}
 			if (Project.block_patcher_preview) return;
@@ -4791,7 +4858,7 @@
 				Blockbench.showMessageBox({ title: 'BlockPatcher', message: 'This model has no texture yet. BlockPatcher needs one to paint walls and lay out UVs.' });
 				return;
 			}
-			session = { uvOnly: !!uvOnly, og, snapshot, images, excluded: new Set(), frozen: new Set(), restoreLog: [], marked: new Set(), preview: null, result: null };
+			session = { cam: grabCamera(), uvOnly, simplify, og, snapshot, images, excluded: new Set(), frozen: new Set(), dropped: new Set(), restoreLog: [], marked: new Set(), preview: null, result: null };
 			Blockbench.showQuickMessage('BlockPatcher…', 600);
 			await new Promise(r => setTimeout(r, 20));
 			try {
@@ -4804,7 +4871,7 @@
 				return;
 			}
 			const r = session.result.report;
-			if (!uvOnly && !session.result.ops.length) {
+			if (!uvOnly && !simplify && !session.result.ops.length) {
 				Blockbench.showQuickMessage('No ADD, CUTOUT or HOLLOW cubes found: only merged, cleaned up and laid out UVs', 3000);
 			}
 		}
@@ -4819,7 +4886,8 @@
 				n++;
 				const opIds = new Set(s.result.ops.map(o => o.uuid));
 				const srcs = p.src.filter(src => !opIds.has(src));
-				for (const op of p.ops) s.excluded.add(op);
+				// the placeholder cubes (ADD, CUTOUT, HOLLOW) that made it go too
+				for (const op of p.ops) { s.excluded.add(op); s.dropped.add(op); }
 				for (const src of srcs) s.frozen.add(src);
 				s.restoreLog.push({ ops: p.ops.slice(), srcs });
 			}
@@ -4916,9 +4984,9 @@
 			});
 			await Promise.all(waits);
 			Canvas.updateAll();
-			Undo.finishEdit(s.uvOnly ? 'Organize UV' : 'BlockPatcher', { elements: added, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
+			Undo.finishEdit(sessionTitle(s), { elements: added, outliner: true, textures: Texture.all.slice(), bitmap: true, uv_mode: true });
 			updateInterfacePanels();
-			Blockbench.showQuickMessage(s.uvOnly ? 'UV organized' : `BlockPatcher applied: ${oldCubes.length} → ${added.length} cubes`, 2500);
+			Blockbench.showQuickMessage(s.uvOnly ? 'UV organized' : `${sessionTitle(s)} applied: ${oldCubes.length} → ${added.length} cubes`, 2500);
 		}
 		async function cancelPatch() {
 			const s = session;
@@ -4938,24 +5006,108 @@
 			if (!markerMaterial.m) markerMaterial.m = new THREE.LineBasicMaterial({ color: 0xff2d55, depthTest: false, transparent: true });
 			return markerMaterial.m;
 		}
-		function drawMarks() {
-			for (const [, m] of markerMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
+		/**
+		 * A red dotted grid over a box, drawn on top of everything: dashed lines every
+		 * `cell` units across each face, and a faint red fill between them.
+		 */
+		function dottedGridMaterial(size) {
+			const cell = Math.max(2, Math.round(Math.max(size[0], size[1], size[2]) / 10));
+			return new THREE.ShaderMaterial({
+				uniforms: { size: { value: new THREE.Vector3(size[0], size[1], size[2]) }, cell: { value: cell }, color: { value: new THREE.Color(0xff2d55) } },
+				vertexShader: `
+					varying vec3 vPos; varying vec3 vNormal;
+					void main() { vPos = position; vNormal = normal; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+				fragmentShader: `
+					uniform vec3 size; uniform float cell; uniform vec3 color;
+					varying vec3 vPos; varying vec3 vNormal;
+					void main() {
+						vec3 p = vPos + size * 0.5;
+						vec3 n = abs(vNormal);
+						vec2 uv = n.x > 0.5 ? p.zy : (n.y > 0.5 ? p.xz : p.xy);
+						vec2 m = mod(uv, cell);
+						float w = cell * 0.09;
+						float dash = cell * 0.5;
+						bool lineU = m.x < w && mod(uv.y, dash) < dash * 0.55;
+						bool lineV = m.y < w && mod(uv.x, dash) < dash * 0.55;
+						if (lineU || lineV) gl_FragColor = vec4(color, 0.95);
+						else gl_FragColor = vec4(color, 0.1);
+					}`,
+				transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide
+			});
+		}
+		function clearMarks() {
+			for (const [, m] of markerMeshes) {
+				if (m.parent) m.parent.remove(m);
+				m.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material && o.material !== markerMaterial.m) o.material.dispose(); });
+			}
 			markerMeshes.clear();
+		}
+		function drawMarks() {
+			clearMarks();
 			if (!session || Project !== session.preview) return;
 			for (const id of session.marked) {
 				const el = OutlinerNode.uuids[id];
 				if (!(el instanceof Cube) || !el.mesh) continue;
 				const size = [0, 1, 2].map(i => Math.max(0.01, el.to[i] - el.from[i]) + 0.2);
-				const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size[0], size[1], size[2]));
-				const line = new THREE.LineSegments(geo, markerMaterial());
-				line.renderOrder = 999;
-				line.position.set(
+				const group = new THREE.Group();
+				const box = new THREE.BoxGeometry(size[0], size[1], size[2]);
+				const grid = new THREE.Mesh(box, dottedGridMaterial(size));
+				const line = new THREE.LineSegments(new THREE.EdgesGeometry(box), markerMaterial());
+				grid.renderOrder = 998; line.renderOrder = 999;
+				grid.raycast = () => {}; line.raycast = () => {};
+				group.add(grid, line);
+				group.position.set(
 					(el.from[0] + el.to[0]) / 2 - el.origin[0],
 					(el.from[1] + el.to[1]) / 2 - el.origin[1],
 					(el.from[2] + el.to[2]) / 2 - el.origin[2]
 				);
-				el.mesh.add(line);
-				markerMeshes.set(id, line);
+				el.mesh.add(group);
+				markerMeshes.set(id, group);
+			}
+			drawChanges();
+		}
+
+		/* outlines of what BlockPatcher changed: every ADD, CUTOUT and HOLLOW it applied, in its colour */
+		const changeMeshes = [];
+		const changeMaterials = {};
+		function drawChanges() {
+			for (const m of changeMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
+			changeMeshes.length = 0;
+			const s = session;
+			if (!s || !s.result || Project !== s.preview || s.uvOnly || s.simplify || bpSettings.show_changes === false) return;
+			const byId = {};
+			for (const el of s.snapshot.elements || []) byId[el.uuid] = el;
+			const parentOf = {};
+			(function walk(list, p) {
+				for (const item of list || []) {
+					if (typeof item === 'string') parentOf[item] = p;
+					else if (item && item.uuid) walk(item.children, item.uuid);
+				}
+			})(s.snapshot.outliner, null);
+			for (const op of s.result.ops) {
+				if (op.status !== 'applied') continue;
+				for (const id of op.members || [op.uuid]) {
+					const el = byId[id];
+					if (!el || !el.from) continue;
+					const style = KIND_STYLE[op.kind];
+					if (!changeMaterials[op.kind]) changeMaterials[op.kind] = new THREE.LineBasicMaterial({ color: style.color, transparent: true, opacity: 0.75, depthTest: false });
+					const size = [0, 1, 2].map(i => Math.max(0.01, el.to[i] - el.from[i]) + 0.1);
+					const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(size[0], size[1], size[2]));
+					const line = new THREE.LineSegments(geo, changeMaterials[op.kind]);
+					line.renderOrder = 990;
+					line.raycast = () => {};
+					// in the space of the bone it was placed in, so turned bones turn it too
+					const group = parentOf[id] && OutlinerNode.uuids[parentOf[id]];
+					const holder = (group && group.mesh) || Project.model_3d;
+					const origin = (group && group.origin) || [0, 0, 0];
+					line.position.set(
+						(el.from[0] + el.to[0]) / 2 - (holder === Project.model_3d ? 0 : origin[0]),
+						(el.from[1] + el.to[1]) / 2 - (holder === Project.model_3d ? 0 : origin[1]),
+						(el.from[2] + el.to[2]) / 2 - (holder === Project.model_3d ? 0 : origin[2])
+					);
+					holder.add(line);
+					changeMeshes.push(line);
+				}
 			}
 		}
 		function toggleMark(el) {
@@ -5006,6 +5158,8 @@
 			v.restored = s.excluded.size + s.frozen.size;
 			v.settings = Object.assign({}, bpSettings);
 			v.uv_only = !!s.uvOnly;
+			v.simplify = !!s.simplify;
+			v.title = sessionTitle(s);
 			v.marker_on = !!(markerTool && Toolbox.selected === markerTool);
 		}
 		function createBpPanel() {
@@ -5019,7 +5173,7 @@
 				default_position: { slot: 'right_bar', float_position: [0, 0], float_size: [320, 640], height: 640 },
 				component: {
 					data() {
-						return { active: false, uv_only: false, report: {}, ops: [], marked: 0, restored: 0, settings: Object.assign({}, bpSettings), marker_on: false };
+						return { active: false, uv_only: false, simplify: false, title: 'BlockPatcher', report: {}, ops: [], marked: 0, restored: 0, settings: Object.assign({}, bpSettings), marker_on: false };
 					},
 					methods: {
 						confirm() { confirmPatch(); },
@@ -5027,9 +5181,10 @@
 						restoreMarked() { restoreMarked(); },
 						marker() { if (markerTool) markerTool.select(); syncBpPanel(); },
 						clearMarks() { if (session) { session.marked.clear(); drawMarks(); syncBpPanel(); } },
+						setShowChanges(on) { bpSettings.show_changes = !!on; saveBpSettings(); drawChanges(); syncBpPanel(); },
 						resetRestores() {
 							if (!session) return;
-							session.excluded.clear(); session.frozen.clear(); session.restoreLog = [];
+							session.excluded.clear(); session.frozen.clear(); session.dropped.clear(); session.restoreLog = [];
 							rerun();
 						},
 						toggleOp(op) {
@@ -5037,7 +5192,7 @@
 							// a merged hollow stands for all the hollow cubes it was made from
 							const ids = op.members || [op.uuid];
 							if (ids.every(id => session.excluded.has(id))) {
-								for (const id of ids) session.excluded.delete(id);
+								for (const id of ids) { session.excluded.delete(id); session.dropped.delete(id); }
 								// let it work on the cubes that were restored together with it again
 								for (const entry of session.restoreLog.filter(e => e.ops.some(o => ids.includes(o)))) {
 									for (const src of entry.srcs) session.frozen.delete(src);
@@ -5055,6 +5210,7 @@
 						},
 						set(key, value) {
 							if (key === 'cull_hidden' && session && session.uvOnly) key = 'uv_cull';
+							if (key === 'uv_mode' && session && session.simplify) key = 'simplify_uv';
 							bpSettings[key] = value;
 							saveBpSettings();
 							rerun();
@@ -5062,7 +5218,7 @@
 					},
 					template: `
 						<div class="bp_panel">
-							<div class="bp_title" v-if="active">{{ uv_only ? 'Organize UV' : 'BlockPatcher' }}</div>
+							<div class="bp_title" v-if="active">{{ title }}</div>
 							<template v-if="active">
 								<div class="bp_actions">
 									<div class="bp_button bp_primary" @click="confirm()" :title="marked ? 'Restore the marked parts, then close the preview and put the rest into your model (one undo step)' : 'Close the preview and put this into your model (one undo step)'"><i class="material-icons">check</i><span>Confirm<template v-if="marked">, restoring {{ marked }}</template></span></div>
@@ -5084,8 +5240,9 @@
 									<div class="bp_button" :class="{selected: marker_on}" @click="marker()" title="Click parts in the preview that came out wrong"><i class="material-icons" style="color:#ff2d55">ads_click</i><span>Marker</span></div>
 									<div class="bp_button" @click="restoreMarked()" title="Restore the marked (or selected) parts right away, to see the result before confirming"><i class="material-icons">restore</i><span>Restore {{ marked ? 'now' : 'selected' }}</span></div>
 								</div>
-								<p class="bp_hint">Click parts that came out wrong with the Marker, or delete them: they get a red box{{ marked ? ' (' + marked + ' marked)' : '' }}, and Confirm puts them back the way they were. <a v-if="marked" @click="clearMarks()">Clear marks</a> <a v-if="restored" @click="resetRestores()">Undo all restores</a></p>
+								<p class="bp_hint">Click parts that came out wrong with the Marker, or delete them: they get a red dotted grid{{ marked ? ' (' + marked + ' marked)' : '' }}, and Confirm puts them back the way they were<template v-if="!simplify"> and removes the ADD, CUTOUT or HOLLOW cube that made them</template>. <a v-if="marked" @click="clearMarks()">Clear marks</a> <a v-if="restored" @click="resetRestores()">Undo all restores</a></p>
 
+								<template v-if="!simplify">
 								<label>Patch cubes <span class="bp_subtle">untick to skip one</span></label>
 								<div class="bp_ops">
 									<div class="bp_op" v-for="op in ops" :key="op.uuid" :class="{off: !op.on}">
@@ -5093,17 +5250,20 @@
 										<i class="material-icons" :style="{color: op.color}">{{ op.icon }}</i>
 										<span class="bp_op_name" @click="showOp(op)" title="Select what this made">{{ op.label }}<span class="bp_subtle" v-if="op.host"> in {{ op.host }}</span></span>
 										<span class="bp_subtle" v-if="op.status === 'nothing'" :title="op.note">no effect</span>
+										<span class="bp_subtle" v-if="op.status === 'removed'" title="Restored: this cube is taken out of the model on Confirm. Tick it to use it again.">restored, removed</span>
 									</div>
 									<p class="bp_hint" v-if="!ops.length">No ADD, CUTOUT or HOLLOW cubes in this model.</p>
 								</div>
 								</template>
+								<p class="bp_hint" v-else>Cubes that form one box are merged, exact duplicates and faces nobody can see are dropped. ADD, CUTOUT and HOLLOW cubes stay as they are.</p>
+								</template>
 								<p class="bp_hint" v-else>Only the UV is laid out again: every face keeps its pixels, and the geometry stays as it is.</p>
 
 								<label>Settings</label>
-								<div class="bp_row" v-if="!uv_only" title="How bright new inner walls are, compared with the surface they are cut into">
+								<div class="bp_row" v-if="!uv_only && !simplify" title="How bright new inner walls are, compared with the surface they are cut into">
 									<span>Wall shade</span><input type="range" min="20" max="100" :value="settings.wall_shade" @change="set('wall_shade', Number($event.target.value))"><span class="bp_subtle">{{ settings.wall_shade }}%</span>
 								</div>
-								<div class="bp_row" v-if="!uv_only">
+								<div class="bp_row" v-if="!uv_only && !simplify">
 									<span>Merge</span>
 									<select :value="settings.merge" @change="set('merge', $event.target.value)">
 										<option value="all">all cubes that form one box</option>
@@ -5113,14 +5273,15 @@
 								</div>
 								<div class="bp_row">
 									<span>UV</span>
-									<select :value="settings.uv_mode" @change="set('uv_mode', $event.target.value)">
+									<select :value="simplify ? (settings.simplify_uv || 'changed') : settings.uv_mode" @change="set('uv_mode', $event.target.value)">
 										<option value="all">repack everything by group</option>
 										<option value="changed">keep untouched UVs, add new at the bottom</option>
 									</select>
 								</div>
 								<div class="bp_row"><span>Padding</span><input type="number" min="0" max="8" :value="settings.padding" @change="set('padding', Number($event.target.value))"><span class="bp_subtle">px between faces</span></div>
+								<div class="bp_row" v-if="!uv_only && !simplify" title="Outline every ADD, CUTOUT and HOLLOW cube BlockPatcher applied, in its colour"><input type="checkbox" :checked="settings.show_changes !== false" @change="setShowChanges($event.target.checked)"><span>Show what changed</span></div>
 								<div class="bp_row"><input type="checkbox" :checked="uv_only ? settings.uv_cull : settings.cull_hidden" @change="set('cull_hidden', $event.target.checked)"><span>Drop faces nobody can see</span></div>
-								<div class="bp_row" v-if="!uv_only"><input type="checkbox" :checked="settings.retexture_add" @change="set('retexture_add', $event.target.checked)"><span>Paint ADD cubes like what they attach to</span></div>
+								<div class="bp_row" v-if="!uv_only && !simplify"><input type="checkbox" :checked="settings.retexture_add" @change="set('retexture_add', $event.target.checked)"><span>Paint ADD cubes like what they attach to</span></div>
 							</template>
 						</div>
 					`
@@ -5136,7 +5297,7 @@
 					[toolbar_item="block_patcher_marker"] .icon, [menu_item="block_patcher_marker"] > .icon { color: #ff2d55 !important; }
 					.bp_panel { padding: 4px 8px 8px; }
 					.bp_title { font-weight: bold; margin-bottom: 4px; }
-					[menu_item="organize_uv"] > .icon { color: ${BP_COLOR} !important; }
+					[menu_item="organize_uv"] > .icon, [menu_item="simplify_model"] > .icon { color: ${BP_COLOR} !important; }
 					.bp_panel > label { display: block; margin: 10px 0 4px; color: var(--color-subtle_text); }
 					.bp_subtle { color: var(--color-subtle_text); font-size: 0.85em; }
 					.bp_actions { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -5164,7 +5325,7 @@
 					description: 'Apply ADD, CUTOUT and HOLLOW cubes, merge cubes and lay out the UV, in a preview tab you confirm',
 					icon: 'auto_fix_high',
 					condition: () => Project && !Project.block_patcher_preview && Modes.edit,
-					click: runBlockPatcher
+					click: () => runBlockPatcher("patch")
 				});
 				MenuBar.addAction(bpAction, 'tools');
 				uvAction = new Action('organize_uv', {
@@ -5172,9 +5333,17 @@
 					description: 'Lay out the whole UV again, bone by bone, without changing the model, in a preview tab you confirm',
 					icon: 'dashboard',
 					condition: () => Project && !Project.block_patcher_preview && Format && Format.id !== 'image',
-					click: () => runBlockPatcher(true)
+					click: () => runBlockPatcher('uv')
 				});
 				MenuBar.addAction(uvAction, 'tools');
+				simplifyAction = new Action('simplify_model', {
+					name: 'Simplify Model',
+					description: 'Merge cubes that form one box, drop duplicates and faces nobody can see, in a preview tab you confirm',
+					icon: 'compress',
+					condition: () => Project && !Project.block_patcher_preview && Format && Format.id !== 'image' && Modes.edit,
+					click: () => runBlockPatcher('simplify')
+				});
+				MenuBar.addAction(simplifyAction, 'tools');
 				try { MenuBar.addAction(uvAction, 'uv'); } catch (e) {}
 				markerTool = new Tool('block_patcher_marker', {
 					name: 'BlockPatcher Marker',
@@ -5215,12 +5384,15 @@
 			onunload() {
 				bpListeners.forEach(l => l && l.delete && l.delete());
 				bpListeners.length = 0;
-				for (const [, m] of markerMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
-				markerMeshes.clear();
+				clearMarks();
+				for (const m of changeMeshes) { if (m.parent) m.parent.remove(m); m.geometry.dispose(); }
+				changeMeshes.length = 0;
+				for (const k in changeMaterials) changeMaterials[k].dispose();
 				if (bpPanel) bpPanel.delete();
 				if (markerTool) markerTool.delete();
 				if (bpAction) bpAction.delete();
 				if (uvAction) uvAction.delete();
+				if (simplifyAction) simplifyAction.delete();
 				if (bpStyle && bpStyle.delete) bpStyle.delete();
 				session = null;
 			}
@@ -5236,7 +5408,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.11.0',
+		version: '1.12.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

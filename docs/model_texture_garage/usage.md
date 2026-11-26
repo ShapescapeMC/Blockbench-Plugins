@@ -217,6 +217,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
 - `Hold to draw a line of cubes`: on by default, see above.
+- `Right-click deletes the cube under the cursor`: on by default. A right-click on a cube deletes it (one undo step) instead of opening the menu; a right-drag still pans the view.
 - `Show placed cubes`: a see-through box in the mode's colour (green, red, blue) over every `ADD`, `CUTOUT` and `HOLLOW` cube, drawn on top of the model, so cubes placed inside it stay easy to find. `always` (the default), `while placing` (only with the tool in hand) or `off`. Not shown in the BlockPatcher preview.
 
 The mode and the standard sizes are also in the tool bar at the top, and the names and inflate under `Tools -> Block Grid Cube Settings`.
@@ -253,7 +254,7 @@ If the toolbox shows the Block Grid Cube tool more than once, another copy of it
 
 BlockPatcher does what the `ADD`, `CUTOUT` and `HOLLOW` cubes ask for, and tidies the model up. Run it with the `BlockPatcher` button in the Block Grid Cube panel, or `Tools -> BlockPatcher`.
 
-Your model is not changed yet. The result opens in a new tab, `<model> · BlockPatcher`, with the BlockPatcher panel on the right. Look it over, fix what went wrong, then press `Confirm`: the tab closes and your model gets the result, as one undo step. `Cancel`, or closing the tab, leaves your model as it was.
+Your model is not changed yet. The result opens in a new tab, looking at the same spot your view was on, `<model> · BlockPatcher`, with the BlockPatcher panel on the right. Look it over, fix what went wrong, then press `Confirm`: the tab closes and your model gets the result, as one undo step. `Cancel`, or closing the tab, leaves your model as it was.
 
 ### What it does
 
@@ -268,12 +269,13 @@ Cubes in a rotated bone, or rotated themselves, only work with cubes turned the 
 
 ### Fixing what went wrong
 
-- Pick the `BlockPatcher Marker` (the button in the panel, or the toolbox) and click parts of the preview that came out wrong. They get a red box. Click again to unmark.
-- Deleting a part of the preview that BlockPatcher changed marks it too: the delete is undone and the part gets a red box.
-- `Confirm` puts the marked parts back the way they were before BlockPatcher, then applies the rest. The button shows how many parts it restores. The `ADD`, `CUTOUT` or `HOLLOW` cubes that made a marked part are skipped and stay in the model as they are, and the cubes they touched are kept unchanged.
+- Every `ADD`, `CUTOUT` and `HOLLOW` cube BlockPatcher applied is outlined in its colour (green, red, blue), so you can see what changed. `Show what changed` turns this off.
+- Pick the `BlockPatcher Marker` (the button in the panel, or the toolbox) and click parts of the preview that came out wrong. They get a red dotted grid. Click again to unmark.
+- Deleting a part of the preview that BlockPatcher changed marks it too: the delete is undone and the part gets the red grid.
+- `Confirm` puts the marked parts back the way they were before BlockPatcher, then applies the rest. The button shows how many parts it restores. The `ADD`, `CUTOUT` or `HOLLOW` cubes that made a marked part are removed from the model, so there is no placeholder left to delete, and the cubes they touched are kept unchanged. A part an original cube was split into is restored with that whole cube, which undoes every patch that changed that cube.
 - `Restore now` does the same straight away, so you can see the result before confirming. With nothing marked, it restores the selected cubes.
 - Marks stay when you change a setting.
-- The `Patch cubes` list shows every `ADD`, `CUTOUT` and `HOLLOW` cube, which cube it works on, and `no effect` when it touches nothing. Untick one to skip it, tick it again to bring it back. Click its name to select what it made.
+- The `Patch cubes` list shows every `ADD`, `CUTOUT` and `HOLLOW` cube, which cube it works on, and `no effect` when it touches nothing. Untick one to skip it: unlike a restore, a skipped cube stays in your model, for later. Tick it again to bring it back. Click its name to select what it made.
 - `Undo all restores` brings back everything you restored.
 
 Restoring (also on `Confirm` with marked parts) and changing settings rebuild the preview from your model, so changes made by hand in the preview are lost then (BlockPatcher asks first). Hand edits are kept when you confirm with nothing marked.
@@ -290,6 +292,10 @@ Restoring (also on `Confirm` with marked parts) and changing settings rebuild th
 The names BlockPatcher looks for are the ones set in the Block Grid Cube panel.
 
 If the texture has painted pixels that no face of the model uses, the panel warns you: they may belong to another model that shares the texture, and repacking everything drops them. Use `keep untouched UVs` for such a model.
+
+## Simplify Model
+
+`Tools -> Simplify Model` does BlockPatcher's tidying without applying any patches: cubes in the same bone that form one box are merged, exact duplicates removed, and faces nobody can see dropped. `ADD`, `CUTOUT` and `HOLLOW` cubes stay as they are. It opens in the same kind of preview tab, with the Marker to restore parts, and by default keeps untouched UVs where they are, adding new faces (merged cubes) below the old texture.
 
 ## Organize UV
 
