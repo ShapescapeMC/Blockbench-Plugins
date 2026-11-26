@@ -24,6 +24,15 @@
  *
  * Alt picks a colour with every brush, as with the normal brush. Presets
  * live in the "edge_noise_presets" folder in Blockbench's user data folder.
+ *
+ * Copyright (c) Shapescape. Licensed under the GNU General Public License v3.0,
+ * like the rest of this repository (see LICENSE).
+ *
+ * Credits:
+ * - Written with AI assistance (Claude Code). Commits carry a Co-Authored-By line.
+ * - No third-party code or libraries are bundled. How face UV corners follow face
+ *   rotation, and which way UVs run on each cube face, follow Blockbench's own
+ *   cube code (https://github.com/JannisX11/blockbench, GPL-3.0), reimplemented here.
  */
 (function () {
 	'use strict';
