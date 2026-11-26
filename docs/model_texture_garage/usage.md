@@ -217,6 +217,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
 - `Hold to draw a line of cubes`: on by default, see above.
+- `Show placed cubes`: a see-through box in the mode's colour (green, red, blue) over every `ADD`, `CUTOUT` and `HOLLOW` cube, drawn on top of the model, so cubes placed inside it stay easy to find. `always` (the default), `while placing` (only with the tool in hand) or `off`. Not shown in the BlockPatcher preview.
 
 The mode and the standard sizes are also in the tool bar at the top, and the names and inflate under `Tools -> Block Grid Cube Settings`.
 
@@ -233,6 +234,10 @@ BlockPatcher (below) turns these cubes into real geometry. A build script of you
 With `Grid` on `Cube size`, cubes snap to a grid of their own size laid over the model's block grid (with separate sizes, each axis snaps to its own size), so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face.
 
 Pick another `Grid` to snap to a different step. Across the face, the cube is centred on the cursor as near as the grid allows. In depth, an added cube starts at the grid line nearest the face, so on a fine grid it stacks flush on faces that are not on a block edge. Cut out and Hollow cubes always start at the face itself. A line drawn by dragging keeps its cubes a whole cube apart, starting from the first one, so a fine grid never leaves overlaps along the line. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
+
+### Placing in hollows
+
+Clicks go through see-through parts of the texture, such as the opening over a hollow, to the walls inside it. A hollow's walls count as seen from inside: `Add` fills the hollow back in from the wall you point at, and `Cut out` cuts on behind that wall, deeper into the model. BlockPatcher then does the rest (see below).
 
 ### The new cubes
 
@@ -254,7 +259,7 @@ Your model is not changed yet. The result opens in a new tab, `<model> · BlockP
 
 1. `ADD` cubes become part of the cube they sit against: same bone, same name, and painted with that cube's pattern so it carries on across the join. Any part of an `ADD` cube that is already inside the model is dropped.
 2. `CUTOUT` cubes carve real empty space. The cubes they cut into are rebuilt around the hole from as few cubes as possible, keeping every pixel of their texture where it was. The new walls inside the hole get the pattern of the surface, darkened by `Wall shade`.
-3. `HOLLOW` cubes make a see-through pocket without extra geometry. The faces of the cube they sit in turn transparent where the hollow is. The hollow cube itself is kept, renamed `HOLLOW into <cube>`, and painted like its surroundings (darkened by `Wall shade`). Its sides that lie on the outside of the model are removed, so you look into it, while the sides inside the model become its walls. Hollows made earlier (any cube whose name starts with `HOLLOW` followed by more words) are left alone, so running BlockPatcher again doesn't redo them.
+3. `HOLLOW` cubes make a see-through pocket without extra geometry. The faces of the cube they sit in turn transparent where the hollow is. The hollow cube itself is kept, renamed `HOLLOW into <cube>`, and painted like its surroundings (darkened by `Wall shade`). Its sides that lie on the outside of the model are removed, so you look into it, while the sides inside the model become its walls. Hollow cubes that together form one box, such as a line drawn with the tool, become one hollow first, and where two hollows touch, the walls between them open up, so the pocket has nothing inside it. Hollows made earlier (any cube whose name starts with `HOLLOW` followed by more words) are not made again when you rerun BlockPatcher, but `ADD` and `CUTOUT` cubes can change them: an `ADD` cube placed in one fills it back in (the hollow shrinks, or goes when it is full), and a `CUTOUT` behind its wall cuts on through, opening the wall.
 4. Exact duplicate cubes are removed. Cubes in the same bone that together form one box are merged into one cube.
 5. Faces nobody can see are dropped: faces fully covered by touching cubes, or inside another cube. Faces next to see-through texture are kept.
 6. The UV is laid out again. `repack everything by group` packs every face into a new, tighter texture, bone by bone, with each cube's faces side by side like box UV. `keep untouched UVs` leaves every face that didn't change exactly where it was and adds the new ones below the old texture.

@@ -2752,7 +2752,8 @@
 			hollow_name: 'HOLLOW',  // name given to cubes made in Hollow mode
 			cutout_inflate: 0.025,  // how much cut-out and hollow cubes are inflated
 			x_toggles: true,        // X switches between Add and Cut out while the tool is held
-			drag_draw: true         // hold the mouse and drag to place a line of cubes
+			drag_draw: true,        // hold the mouse and drag to place a line of cubes
+			overlay: 'always'       // coloured boxes on placed ADD / CUTOUT / HOLLOW cubes: 'always', 'tool' (while placing) or 'off'
 		};
 		const STORAGE_KEY = 'block_grid_modeler_settings';
 		const SIZES = [4, 8, 16, 32, 64];
@@ -2851,13 +2852,29 @@
 			return p === size ? null : p;
 		}
 
+		/**
+		 * Which mode made a cube called `name`: 'add', 'cutout', 'hollow' or null.
+		 * `names` maps modes to their names; a number on the end (as Blockbench
+		 * adds when duplicating, "CUTOUT2") still counts.
+		 */
+		function modeOfName(name, names) {
+			const n = String(name || '').trim();
+			for (const mode of ['add', 'cutout', 'hollow']) {
+				const base = names[mode];
+				if (!base) continue;
+				const esc = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				if (new RegExp('^' + esc + '(?:[\\s._-]*\\d+)?$').test(n)) return mode;
+			}
+			return null;
+		}
+
 		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
 		function toggledMode(mode) {
 			return mode === 'add' ? 'cutout' : 'add';
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, modeOfName, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -2882,23 +2899,76 @@
 			return String(settings[key] || DEFAULTS[key]).toUpperCase();
 		}
 
-		/** The model point and face direction under the cursor, or null if not over a cube. */
+		/** The face key a ray hit on a cube's mesh, from the hit triangle. */
+		function faceOfHit(cube, intersect) {
+			const geo = cube.mesh && cube.mesh.geometry;
+			if (geo && Array.isArray(geo.faces)) return geo.faces[Math.floor(intersect.faceIndex / 2)];
+			return null;
+		}
+
+		/** Is the texture see-through at the place a ray hit this face? */
+		function seeThroughAt(cube, faceKey, intersect) {
+			try {
+				const face = cube.faces[faceKey];
+				if (!face || face.texture === null || face.texture === false) return true;
+				const texture = face.getTexture();
+				if (!texture || !intersect.uv) return false;
+				const [x, y] = Painter.getCanvasToolPixelCoords(intersect.uv, texture);
+				const ctx = Painter.getCanvas(texture).getContext('2d');
+				return ctx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data[3] < 2;
+			} catch (e) {
+				return false;
+			}
+		}
+
+		/** A cube made into a hollow before (by BlockPatcher, or named so by hand), as opposed to one waiting to be applied. */
+		function isMadeHollow(cube) {
+			const n = String(cube.name || '').trim(), base = nameFor('hollow');
+			return n.startsWith(base) && !modeOfName(n, { hollow: base });
+		}
+
+		/**
+		 * The model point and face under the cursor, or null if not over a cube.
+		 * Clicks pass through see-through texture (the opening over a hollow), so
+		 * you reach the walls inside it. A hollow's walls are seen from inside, so
+		 * there the face counts as facing the other way: Add fills the hollow,
+		 * Cut out cuts on behind the wall.
+		 */
 		function hitOnCube(data) {
-			if (!data || data.type !== 'element' || !(data.element instanceof Cube) || !data.intersects || !data.intersects[0]) return null;
-			const cube = data.element;
-			const normal = FACE_NORMALS[data.face];
-			if (!normal || !cube.mesh) return null;
-			// world point -> the cube's own space -> model coordinates
+			if (!data || data.type !== 'element' || !data.intersects || !data.intersects[0]) return null;
+			let sawElement = false;
+			for (const intersect of data.intersects) {
+				const obj = intersect.object;
+				if (!obj || !obj.isElement) continue;
+				sawElement = true;
+				const cube = OutlinerNode.uuids[obj.name];
+				if (!(cube instanceof Cube) || !cube.mesh) continue;
+				const face = faceOfHit(cube, intersect) || (cube === data.element ? data.face : null);
+				let normal = FACE_NORMALS[face];
+				if (!normal) continue;
+				if (seeThroughAt(cube, face, intersect)) continue;
+				// world point -> the cube's own space -> model coordinates
+				const local = cube.mesh.worldToLocal(intersect.point.clone());
+				const point = [local.x + cube.origin[0], local.y + cube.origin[1], local.z + cube.origin[2]];
+				const a = normal.findIndex(v => v !== 0);
+				const facePlane = normal[a] > 0 ? cube.to[a] : cube.from[a];
+				const inHollow = isMadeHollow(cube);
+				if (inHollow) normal = normal.map(v => -v);
+				return { cube, face, point, normal, facePlane, inHollow };
+			}
+			if (sawElement || !(data.element instanceof Cube) || !data.element.mesh) return null;
+			// no mesh details with the hit: take the element and face Blockbench picked
+			const cube = data.element, normal = FACE_NORMALS[data.face];
+			if (!normal) return null;
 			const local = cube.mesh.worldToLocal(data.intersects[0].point.clone());
-			const point = [local.x + cube.origin[0], local.y + cube.origin[1], local.z + cube.origin[2]];
-			return { cube, face: data.face, point, normal };
+			return { cube, face: data.face, point: [local.x + cube.origin[0], local.y + cube.origin[1], local.z + cube.origin[2]], normal };
 		}
 
 		function cellFor(hit) {
 			const centred = typeof Format !== 'undefined' && !!Format.centered_grid;
 			// where the clicked face sits on its own axis: the top of the cube for 'up', and so on
 			const a = hit.normal.findIndex(v => v !== 0);
-			const facePlane = hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a];
+			const facePlane = typeof hit.facePlane === 'number' ? hit.facePlane : (hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a]);
 			return targetCell(hit.point, hit.normal, cubeSize(), settings.mode, centred, facePlane, gridStep());
 		}
 
@@ -3152,6 +3222,75 @@
 			Blockbench.showQuickMessage(MODES[settings.mode].name, 700);
 		}
 
+		/* --- overlay: placed ADD / CUTOUT / HOLLOW cubes stay visible --- */
+
+		const overlays = [];
+		const overlayMaterials = {};
+		function overlayMaterial(mode, fill) {
+			const key = mode + (fill ? '_fill' : '_line');
+			if (!overlayMaterials[key]) {
+				overlayMaterials[key] = fill
+					? new THREE.MeshBasicMaterial({ color: MODES[mode].color, transparent: true, opacity: 0.14, depthTest: false, depthWrite: false })
+					: new THREE.LineBasicMaterial({ color: MODES[mode].color, transparent: true, opacity: 0.95, depthTest: false });
+			}
+			return overlayMaterials[key];
+		}
+		function clearOverlay() {
+			for (const o of overlays) {
+				if (o.parent) o.parent.remove(o);
+				o.children.forEach(ch => ch.geometry && ch.geometry.dispose());
+			}
+			overlays.length = 0;
+		}
+		function overlayWanted() {
+			if (settings.overlay === 'off' || typeof Project === 'undefined' || !Project || !Modes.edit) return false;
+			if (Project.block_patcher_preview) return false;
+			return settings.overlay === 'always' || (tool && Toolbox.selected === tool);
+		}
+		/**
+		 * A see-through box in the mode's colour over every placed cube, drawn on
+		 * top of the model, so cut-out and hollow cubes inside it can be found.
+		 */
+		function updateOverlay() {
+			clearOverlay();
+			if (!overlayWanted()) return;
+			const names = { add: nameFor('add'), cutout: nameFor('cutout'), hollow: nameFor('hollow') };
+			for (const cube of Cube.all) {
+				const mode = modeOfName(cube.name, names);
+				if (!mode || !cube.mesh || cube.visibility === false) continue;
+				const grow = (Number(cube.inflate) || 0) + 0.05;
+				const size = [0, 1, 2].map(a => Math.max(0.01, cube.to[a] - cube.from[a] + grow * 2));
+				const geo = new THREE.BoxGeometry(size[0], size[1], size[2]);
+				const group = new THREE.Group();
+				group.name = 'block_grid_modeler_overlay';
+				const fill = new THREE.Mesh(geo, overlayMaterial(mode, true));
+				const line = new THREE.LineSegments(new THREE.EdgesGeometry(geo), overlayMaterial(mode, false));
+				fill.renderOrder = 8; line.renderOrder = 9;
+				group.add(fill, line);
+				// not hit by clicks: the cube itself is
+				fill.raycast = () => {}; line.raycast = () => {};
+				group.position.set(
+					(cube.from[0] + cube.to[0]) / 2 - cube.origin[0],
+					(cube.from[1] + cube.to[1]) / 2 - cube.origin[1],
+					(cube.from[2] + cube.to[2]) / 2 - cube.origin[2]
+				);
+				cube.mesh.add(group);
+				overlays.push(group);
+			}
+		}
+		let overlayQueued = false;
+		function queueOverlay() {
+			if (overlayQueued) return;
+			overlayQueued = true;
+			setTimeout(() => { overlayQueued = false; try { updateOverlay(); } catch (e) { console.error(e); } }, 0);
+		}
+		function setOverlay(value) {
+			settings.overlay = ['always', 'tool', 'off'].includes(value) ? value : 'always';
+			saveSettings();
+			updateOverlay();
+			syncPanel();
+		}
+
 		/* --- Ctrl + mouse wheel: size --- */
 
 		let wheelBuffer = 0, wheelTime = 0;
@@ -3209,6 +3348,7 @@
 			vue.inflate = settings.cutout_inflate;
 			vue.x_toggles = settings.x_toggles;
 			vue.drag_draw = settings.drag_draw;
+			vue.overlay = settings.overlay || 'always';
 			try { vue.counts = countByName(); } catch (e) {}
 		}
 
@@ -3241,6 +3381,7 @@
 							inflate: settings.cutout_inflate,
 							x_toggles: settings.x_toggles,
 							drag_draw: settings.drag_draw,
+							overlay: settings.overlay || 'always',
 							counts: { add: 0, cutout: 0, hollow: 0 }
 						};
 					},
@@ -3252,6 +3393,7 @@
 						setSize(size) { setSize(size); },
 						setAxisSize(key, size) { setAxisSize(key, size); },
 						setSeparate(on) { setSeparate(on); },
+						setOverlay(value) { setOverlay(value); },
 						setGrid(value) { setGrid(value); },
 						setName(mode, value) {
 							settings[mode + '_name'] = String(value || DEFAULTS[mode + '_name']).toUpperCase().trim() || DEFAULTS[mode + '_name'];
@@ -3332,6 +3474,14 @@
 							<div class="bgc_row" title="Hold the mouse and drag across faces to place a line of cubes on the same layer as the first one.">
 								<input type="checkbox" :checked="drag_draw" @change="setDrag($event.target.checked)">
 								<span>Hold to draw a line of cubes</span>
+							</div>
+							<div class="bgc_row" title="A see-through box in each mode's colour over placed cubes, drawn on top of the model, so cut-out and hollow cubes inside it stay easy to find">
+								<span>Show placed cubes</span>
+								<select :value="overlay" @change="setOverlay($event.target.value)">
+									<option value="always">always</option>
+									<option value="tool">while placing</option>
+									<option value="off">off</option>
+								</select>
 							</div>
 							<label>Apply <span class="bgc_subtle">turn the cubes above into real geometry</span></label>
 							<div class="bgc_buttons">
@@ -3447,11 +3597,13 @@
 						if (SIZES.includes(Number(settings.size))) sizeSelect.set(String(settings.size));
 						gridSelect.set(String(settings.grid));
 						syncPanel();
+						queueOverlay();
 						if (typeof updateInterfacePanels === 'function') updateInterfacePanels();
 					},
 					onUnselect() {
 						clearPreview();
 						lastHover = null;
+						queueOverlay();
 						// the panel goes away with the tool, once the switch has happened
 						setTimeout(() => { if (typeof updateInterfacePanels === 'function') updateInterfacePanels(); }, 0);
 					}
@@ -3464,6 +3616,10 @@
 				for (const event of ['finished_edit', 'undo', 'redo', 'select_project']) {
 					listeners.push(Blockbench.on(event, syncPanel));
 				}
+				for (const event of ['finished_edit', 'undo', 'redo', 'select_project', 'select_mode', 'load_undo_save', 'add_cube', 'update_visibility']) {
+					listeners.push(Blockbench.on(event, queueOverlay));
+				}
+				queueOverlay();
 
 				settingsAction = new Action('block_grid_modeler_settings', {
 					name: 'Block Grid Cube Settings',
@@ -3480,7 +3636,9 @@
 				listeners.forEach(l => l && l.delete && l.delete());
 				listeners.length = 0;
 				clearPreview();
+				clearOverlay();
 				for (const key in previewMaterials) previewMaterials[key].dispose();
+				for (const key in overlayMaterials) overlayMaterials[key].dispose();
 				if (panel) panel.delete();
 				if (tool) tool.delete();
 				if (toolbar && toolbar.node) toolbar.node.remove();
@@ -3927,6 +4085,47 @@
 			}
 			const solids = () => boxes.filter(b => !b.kind && !b.passive && !b.hollow);
 			const describe = b => b.name + ' [' + b.from.join(',') + ' → ' + b.to.join(',') + ']';
+			/**
+			 * Hollows made before can be filled in again (ADD) or cut on through (CUTOUT).
+			 * Opens the walls of every hollow that `region` covers: from inside the
+			 * hollow ('inside', an ADD filling it) or from beyond the wall ('beyond', a
+			 * cut-out reaching past it). A hollow left with no walls is removed.
+			 */
+			function openHollowWalls(region, side, frame, opId) {
+				for (const H of boxes.filter(b => b.hollow && b.frame === frame)) {
+					let touched = false;
+					for (const d of BP_FACES) {
+						const f = H.faces[d];
+						if (!f) continue;
+						const [a, sg] = BP_DIRS[d];
+						const q = facePlane(H, d);
+						if (region.from[a] > q + EPS || region.to[a] < q - EPS) continue;
+						const ok = side === 'inside'
+							? (sg > 0 ? region.from[a] < q - EPS : region.to[a] > q + EPS)
+							: (sg > 0 ? region.to[a] > q + EPS : region.from[a] < q - EPS);
+						if (!ok) continue;
+						const r = rectIntersect(faceRect(H, d), faceRect(region, d));
+						if (!r || !clearRect(f, H, d, r)) continue;
+						touched = true;
+						if (emptyFace(f)) H.faces[d] = null;
+					}
+					if (!touched) continue;
+					H.changed = true; H.ops.add(opId);
+					if (BP_FACES.every(d => !H.faces[d])) { boxes = boxes.filter(b => b !== H); report.hollows_filled = (report.hollows_filled || 0) + 1; }
+				}
+			}
+			/** Solid cubes without the pockets of hollows made before. */
+			function solidParts(frame) {
+				const hs = boxes.filter(b => b.hollow && b.frame === frame);
+				const parts = [];
+				for (const B of solids()) {
+					if (B.frame !== frame) continue;
+					let ps = [{ from: B.from.slice(), to: B.to.slice() }];
+					for (const H of hs) ps = ps.flatMap(p => subtractBox(p, H));
+					parts.push(...ps);
+				}
+				return parts;
+			}
 
 			/* 1. ADD: becomes part of the cube it attaches to */
 			for (const A of boxes.filter(b => b.kind === 'add')) {
@@ -3939,11 +4138,9 @@
 					if (sc > score) { score = sc; host = B; }
 				}
 				// the part of the ADD cube that isn't inside existing cubes
+				// (a hollow's pocket counts as empty, so an ADD cube can fill it in again)
 				let pieces = [{ from: A.from.slice(), to: A.to.slice() }];
-				for (const B of solids()) {
-					if (B.frame !== A.frame) continue;
-					pieces = pieces.flatMap(p => subtractBox(p, B));
-				}
+				for (const B of solidParts(A.frame)) pieces = pieces.flatMap(p => subtractBox(p, B));
 				boxes = boxes.filter(b => b !== A);
 				if (!pieces.length) { op.status = 'nothing'; op.note = 'already inside existing cubes'; continue; }
 				if (host) op.host = host.name;
@@ -3963,6 +4160,7 @@
 						}
 					}
 					boxes.push(nb);
+					openHollowWalls(nb, 'inside', A.frame, A.uuid);
 				}
 				report.adds++;
 			}
@@ -3992,6 +4190,7 @@
 								// a new wall looking into the cut
 								const sd = patternSource(B, d);
 								nb.faces[d] = sd ? patternFace(nb, d, B, sd, shade) : null;
+								if (nb.faces[d]) nb.faces[d].cutWall = C.uuid;
 							} else {
 								nb.faces[d] = null; // seam between two pieces of the same cube
 							}
@@ -4012,12 +4211,55 @@
 						if (sd) { X.faces[d] = patternFace(X, d, X, sd, shade); X.changed = true; X.ops.add(C.uuid); }
 					}
 				}
+				// cutting on from inside a hollow: its walls open into the cut, and the new walls of the
+				// cut that stand inside the hollow's pocket (its way in) are see-through too
+				openHollowWalls(C, 'beyond', C.frame, C.uuid);
+				for (const H of boxes.filter(b => b.hollow && b.frame === C.frame && (overlapsVolume(b, C) || contactArea(b, C) > 0))) {
+					for (const B of solids()) {
+						if (B.frame !== C.frame || !B.ops.has(C.uuid)) continue;
+						for (const d of BP_FACES) {
+							const f = B.faces[d];
+							if (!f || f.cutWall !== C.uuid) continue;
+							const [a] = BP_DIRS[d];
+							const q = facePlane(B, d);
+							if (q < H.from[a] - EPS || q > H.to[a] + EPS) continue;
+							const r = rectIntersect(faceRect(B, d), faceRect(H, d));
+							if (r && clearRect(f, B, d, r)) { B.holey = true; if (emptyFace(f)) B.faces[d] = null; }
+						}
+					}
+				}
 				report.cutouts++;
 			}
 
 			/* 3. HOLLOW: a see-through pocket made with texture instead of geometry */
+			// hollow cubes that together form one box (a line drawn with the tool) become one hollow
+			{
+				let again = true;
+				while (again) {
+					again = false;
+					const hs = boxes.filter(b => b.kind === 'hollow');
+					search:
+					for (const A of hs) for (const B of hs) {
+						if (A === B || A.frame !== B.frame) continue;
+						for (let k = 0; k < 3; k++) {
+							if (Math.abs(A.to[k] - B.from[k]) >= EPS) continue;
+							if (![0, 1, 2].every(i => i === k || (Math.abs(A.from[i] - B.from[i]) < EPS && Math.abs(A.to[i] - B.to[i]) < EPS))) continue;
+							A.to[k] = B.to[k];
+							A.src = new Set([...A.src, ...B.src]);
+							A.ops = new Set([...A.ops, ...B.ops]);
+							A.members = [...(A.members || [A.uuid]), ...(B.members || [B.uuid])];
+							boxes = boxes.filter(b => b !== B);
+							report.hollows_merged = (report.hollows_merged || 0) + 1;
+							again = true;
+							break search;
+						}
+					}
+				}
+			}
+			const madeHollows = [];
 			for (const H of boxes.filter(b => b.kind === 'hollow')) {
-				const op = { uuid: H.uuid, kind: 'hollow', name: H.name, status: 'applied', host: null };
+				const op = { uuid: H.uuid, kind: 'hollow', name: H.name, status: 'applied', host: null, members: H.members || [H.uuid] };
+				if (op.members.length > 1) op.name += ' ×' + op.members.length;
 				ops.push(op);
 				const near = solids().filter(B => B.frame === H.frame);
 				const hosts = near.filter(B => overlapsVolume(B, H)).sort((a, b) => overlapVolume(b, H) - overlapVolume(a, H));
@@ -4025,6 +4267,7 @@
 				const host = hosts[0];
 				op.host = host.name;
 				H.kind = null; H.hollow = true; H.changed = true; H.frozen = false;
+				madeHollows.push(H);
 				H.name = s.hollow_name + ' into ' + host.name;
 				H.group = host.group; H.el = Object.assign({}, H.el, { inflate: 0 });
 				// its own faces: open where it sits flush on the surface of a host, walls everywhere else
@@ -4064,11 +4307,43 @@
 				}
 				report.hollows++;
 			}
+			// where two hollows touch, the walls between them open up: one pocket, nothing inside it
+			for (const H of madeHollows) {
+				for (const d of BP_FACES) {
+					const f = H.faces[d];
+					if (!f) continue;
+					const [a, sg] = BP_DIRS[d];
+					const q = facePlane(H, d), r = faceRect(H, d);
+					for (const H2 of boxes) {
+						if (H2 === H || !H2.hollow || H2.frame !== H.frame) continue;
+						// the other pocket carries on past this wall
+						const beyond = sg > 0 ? (H2.to[a] > q + EPS && H2.from[a] <= q + EPS) : (H2.from[a] < q - EPS && H2.to[a] >= q - EPS);
+						if (!beyond) continue;
+						const i = rectIntersect(r, faceRect(H2, d));
+						if (i) clearRect(f, H, d, i);
+					}
+					if (emptyFace(f)) H.faces[d] = null;
+				}
+			}
 			// excluded patch cubes go back to being plain cubes for the rest of the run, untouched
 			for (const b of boxes) if (b.excludedPatch) {
 				ops.push({ uuid: b.uuid, kind: b.excludedPatch, name: b.name, status: 'excluded', host: null });
 				b.kind = null;
 			}
+
+			/* 4a. faces that ended up fully see-through are no faces; a cube with no faces left that sits
+			   inside another cube (a piece of a cube in a hollow that was filled in again) goes */
+			for (const b of boxes) {
+				if (b.kind || b.frozen || b.passive || !b.changed) continue;
+				for (const d of BP_FACES) if (b.faces[d] && emptyFace(b.faces[d])) b.faces[d] = null;
+			}
+			boxes = boxes.filter(b => {
+				if (b.kind || b.frozen || b.passive || b.hollow || !b.changed || BP_FACES.some(d => b.faces[d])) return true;
+				const inside = boxes.some(Y => Y !== b && !Y.kind && !Y.hollow && !Y.passive && Y.frame === b.frame &&
+					[0, 1, 2].every(i => b.from[i] >= Y.from[i] - EPS && b.to[i] <= Y.to[i] + EPS));
+				if (inside) report.empty_removed = (report.empty_removed || 0) + 1;
+				return !inside;
+			});
 
 			/* 4. exact duplicates (same place, same look) are one cube too many */
 			if (!s.uv_only) {
@@ -4759,19 +5034,21 @@
 						},
 						toggleOp(op) {
 							if (!session) return;
-							if (session.excluded.has(op.uuid)) {
-								session.excluded.delete(op.uuid);
+							// a merged hollow stands for all the hollow cubes it was made from
+							const ids = op.members || [op.uuid];
+							if (ids.every(id => session.excluded.has(id))) {
+								for (const id of ids) session.excluded.delete(id);
 								// let it work on the cubes that were restored together with it again
-								for (const entry of session.restoreLog.filter(e => e.ops.includes(op.uuid))) {
+								for (const entry of session.restoreLog.filter(e => e.ops.some(o => ids.includes(o)))) {
 									for (const src of entry.srcs) session.frozen.delete(src);
 								}
-								session.restoreLog = session.restoreLog.filter(e => !e.ops.includes(op.uuid));
-							} else session.excluded.add(op.uuid);
+								session.restoreLog = session.restoreLog.filter(e => !e.ops.some(o => ids.includes(o)));
+							} else for (const id of ids) session.excluded.add(id);
 							rerun();
 						},
 						showOp(op) {
 							if (!session) return;
-							const ids = Object.keys(session.result.provenance).filter(id => session.result.provenance[id].ops.includes(op.uuid));
+							const ids = Object.keys(session.result.provenance).filter(id => session.result.provenance[id].ops.some(o => (op.members || [op.uuid]).includes(o)));
 							unselectAllElements();
 							ids.forEach(id => { const el = OutlinerNode.uuids[id]; if (el && el.markAsSelected) el.markAsSelected(); });
 							updateSelection();
@@ -4959,7 +5236,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.10.0',
+		version: '1.11.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
