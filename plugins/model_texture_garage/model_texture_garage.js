@@ -2870,13 +2870,28 @@
 			return null;
 		}
 
+		/**
+		 * Moves `cell` outward along `normal`, one cell at a time, until it no
+		 * longer overlaps any of `boxes`: a new ADD cube stacks onto ADD cubes
+		 * already there instead of landing inside them. Returns the moved cell.
+		 */
+		function stackOut(cell, normal, boxes) {
+			const a = normal.findIndex(v => v !== 0);
+			if (a < 0) return cell;
+			const step = (cell.to[a] - cell.from[a]) * Math.sign(normal[a]);
+			const overlaps = c => boxes.some(b => [0, 1, 2].every(i => Math.min(b.to[i], c.to[i]) - Math.max(b.from[i], c.from[i]) > 1e-6));
+			const out = { from: cell.from.slice(), to: cell.to.slice() };
+			for (let n = 0; n < 64 && overlaps(out); n++) { out.from[a] += step; out.to[a] += step; }
+			return out;
+		}
+
 		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
 		function toggledMode(mode) {
 			return mode === 'add' ? 'cutout' : 'add';
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, modeOfName, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, modeOfName, stackOut, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -2948,7 +2963,9 @@
 				const face = faceOfHit(cube, intersect) || (cube === data.element ? data.face : null);
 				let normal = FACE_NORMALS[face];
 				if (!normal) continue;
-				if (seeThroughAt(cube, face, intersect)) continue;
+				// placed ADD, CUTOUT and HOLLOW cubes are always solid to the tool, whatever their texture
+				const placed = modeOfName(cube.name, { add: nameFor('add'), cutout: nameFor('cutout'), hollow: nameFor('hollow') });
+				if (!placed && seeThroughAt(cube, face, intersect)) continue;
 				// world point -> the cube's own space -> model coordinates
 				const local = cube.mesh.worldToLocal(intersect.point.clone());
 				const point = [local.x + cube.origin[0], local.y + cube.origin[1], local.z + cube.origin[2]];
@@ -2971,7 +2988,12 @@
 			// where the clicked face sits on its own axis: the top of the cube for 'up', and so on
 			const a = hit.normal.findIndex(v => v !== 0);
 			const facePlane = typeof hit.facePlane === 'number' ? hit.facePlane : (hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a]);
-			return targetCell(hit.point, hit.normal, cubeSize(), settings.mode, centred, facePlane, gridStep());
+			const cell = targetCell(hit.point, hit.normal, cubeSize(), settings.mode, centred, facePlane, gridStep());
+			if (settings.mode !== 'add') return cell;
+			// a spot taken by an ADD cube: stack the new one on top of it
+			const names = { add: nameFor('add') };
+			const adds = Cube.all.filter(c => modeOfName(c.name, names) === 'add').map(c => ({ from: c.from, to: c.to }));
+			return stackOut(cell, hit.normal, adds);
 		}
 
 		/** The cube's size along x, y and z in model units. */
@@ -5432,7 +5454,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.12.1',
+		version: '1.13.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

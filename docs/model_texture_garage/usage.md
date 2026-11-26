@@ -224,7 +224,7 @@ The mode and the standard sizes are also in the tool bar at the top, and the nam
 
 ### Modes
 
-- `Add`: the new cube goes just outside the face you point at, as if you were stacking a block onto it. Named `ADD`.
+- `Add`: the new cube goes just outside the face you point at, as if you were stacking a block onto it. Where an `ADD` cube already takes that spot, the new one stacks on top of it (further out from the face), so clicking the same spot again builds a pile. Named `ADD`.
 - `Cut out`: the new cube goes just inside the face you point at: its outer side is flush with that face, even where the face is not on a block edge, and it reaches the cube size inwards. Along the face it stays on the block grid. It is inflated so it sits slightly proud of the surface, where you can see it. Named `CUTOUT`.
 - `Hollow`: placed like Cut out, flush with the face you point at and inflated, but named `HOLLOW`, for a build script that hollows that part out rather than removing it.
 
@@ -244,7 +244,8 @@ Clicks go through see-through parts of the texture, such as the opening over a h
 
 - They go into the same bone as the cube you clicked, with the same pivot, so they move with it.
 - Every face gets the texture of the face you clicked, and the UV is laid out automatically. BlockPatcher repaints and remaps it.
-- Clicking a spot that already has a cube of the same name and size does nothing.
+- In Cut out and Hollow mode, clicking a spot that already has a cube of the same name and size does nothing.
+- Placed `ADD`, `CUTOUT` and `HOLLOW` cubes always catch clicks, even where their texture is see-through.
 
 ```{note}
 If the toolbox shows the Block Grid Cube tool more than once, another copy of it is installed, such as the separate Block Grid Modeler plugin from before the two were combined. Uninstall that one. Model & Texture Garage also tidies up leftover toolbox entries when it loads, so after a restart there is one again.
