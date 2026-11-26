@@ -2742,6 +2742,10 @@
 		const DEFAULTS = {
 			mode: 'add',            // 'add', 'cutout' or 'hollow'
 			size: 16,               // cube size in model units, 16 = one block
+			separate: false,        // width, height and depth set one by one instead of one size
+			width: 16,              // along x, when separate
+			height: 16,             // along y, when separate
+			depth: 16,              // along z, when separate
 			grid: 'size',           // the grid cubes snap to: 4 to 64 units, or 'size' for the cube size
 			add_name: 'ADD',        // name given to cubes made in Add mode
 			cutout_name: 'CUTOUT',  // name given to cubes made in Cut out mode
@@ -2790,20 +2794,23 @@
 		 */
 		function targetCell(point, normal, size, mode, centred, facePlane, grid) {
 			const off = gridOffset(centred);
-			const step = grid > 0 ? grid : size;
+			// size and grid: one number for every axis, or [x, y, z]
+			const sz = Array.isArray(size) ? size : [size, size, size];
+			const gr = Array.isArray(grid) ? grid : [grid, grid, grid];
+			const step = [0, 1, 2].map(a => gr[a] > 0 ? gr[a] : sz[a]);
 			const inside = mode === 'cutout' || mode === 'hollow';
-			const snap = (v, a) => Math.round((v - off[a]) / step) * step + off[a];
+			const snap = (v, a) => Math.round((v - off[a]) / step[a]) * step[a] + off[a];
 			const from = [0, 0, 0], to = [0, 0, 0];
 			for (let a = 0; a < 3; a++) {
 				if (normal[a] !== 0) {
 					const surface = inside && typeof facePlane === 'number' ? facePlane : snap(point[a], a);
 					const outward = normal[a] > 0;
 					// add builds out from the face, cut out and hollow reach in from it
-					if (inside === outward) { to[a] = surface; from[a] = surface - size; }
-					else { from[a] = surface; to[a] = surface + size; }
+					if (inside === outward) { to[a] = surface; from[a] = surface - sz[a]; }
+					else { from[a] = surface; to[a] = surface + sz[a]; }
 				} else {
-					from[a] = snap(point[a] - size / 2, a);
-					to[a] = from[a] + size;
+					from[a] = snap(point[a] - sz[a] / 2, a);
+					to[a] = from[a] + sz[a];
 				}
 			}
 			return { from, to };
@@ -2816,11 +2823,12 @@
 		 * Returns a list of `from` corners, without a, ending with b.
 		 */
 		function cellsBetween(a, b, size, fixed) {
-			const steps = [0, 1, 2].map(i => i === fixed ? 0 : Math.round((b[i] - a[i]) / size));
+			const sz = Array.isArray(size) ? size : [size, size, size];
+			const steps = [0, 1, 2].map(i => i === fixed ? 0 : Math.round((b[i] - a[i]) / sz[i]));
 			const n = Math.max(Math.abs(steps[0]), Math.abs(steps[1]), Math.abs(steps[2]));
 			const out = [];
 			for (let k = 1; k <= n; k++) {
-				out.push([0, 1, 2].map(i => i === fixed ? a[i] : a[i] + Math.round(steps[i] * k / n) * size));
+				out.push([0, 1, 2].map(i => i === fixed ? a[i] : a[i] + Math.round(steps[i] * k / n) * sz[i]));
 			}
 			return out;
 		}
@@ -2873,12 +2881,20 @@
 			// where the clicked face sits on its own axis: the top of the cube for 'up', and so on
 			const a = hit.normal.findIndex(v => v !== 0);
 			const facePlane = hit.normal[a] > 0 ? hit.cube.to[a] : hit.cube.from[a];
-			return targetCell(hit.point, hit.normal, Number(settings.size) || 16, settings.mode, centred, facePlane, gridStep());
+			return targetCell(hit.point, hit.normal, cubeSize(), settings.mode, centred, facePlane, gridStep());
 		}
 
-		/** The grid step in model units: the chosen grid, or the cube size. */
+		/** The cube's size along x, y and z in model units. */
+		function cubeSize() {
+			const one = Number(settings.size) || 16;
+			if (!settings.separate) return [one, one, one];
+			return ['width', 'height', 'depth'].map(k => Number(settings[k]) || one);
+		}
+
+		/** The grid step in model units, per axis: the chosen grid, or the cube size. */
 		function gridStep() {
-			return settings.grid === 'size' ? Number(settings.size) || 16 : Number(settings.grid) || Number(settings.size) || 16;
+			const g = Number(settings.grid);
+			return settings.grid === 'size' || !g ? cubeSize() : [g, g, g];
 		}
 
 		function setGrid(value) {
@@ -2901,9 +2917,11 @@
 			syncPanel();
 		}
 
+		/** One size for the whole cube (also turns separate sizes off). */
 		function setSize(size) {
 			const v = Math.max(1, Math.min(256, Math.round(Number(size)) || 16));
 			settings.size = v;
+			settings.separate = false;
 			saveSettings();
 			if (sizeSelect && SIZES.includes(v)) sizeSelect.set(String(v));
 			clearPreview();
@@ -2990,6 +3008,29 @@
 			return cube;
 		}
 
+		/** Width, height or depth on its own (turns separate sizes on). */
+		function setAxisSize(key, size) {
+			if (!['width', 'height', 'depth'].includes(key)) return;
+			settings[key] = Math.max(1, Math.min(256, Math.round(Number(size)) || 16));
+			settings.separate = true;
+			saveSettings();
+			clearPreview();
+			if (lastHover) showPreview(lastHover);
+			syncPanel();
+		}
+
+		function setSeparate(on) {
+			settings.separate = !!on;
+			if (on) {
+				// start from the current cube size
+				for (const k of ['width', 'height', 'depth']) if (!settings[k]) settings[k] = Number(settings.size) || 16;
+			}
+			saveSettings();
+			clearPreview();
+			if (lastHover) showPreview(lastHover);
+			syncPanel();
+		}
+
 		/*
 		 * A placing stroke: pressing on a face places the first cube; with
 		 * "Hold to draw" on, dragging keeps placing cubes on the same layer as
@@ -3012,17 +3053,17 @@
 
 		function continueStroke(hit) {
 			if (!stroke || !hit || hit.normal.join(',') !== stroke.normal) return;
-			const size = Number(settings.size) || 16;
+			const size = cubeSize();
 			const cell = cellFor(hit);
 			// stay on the layer the stroke started on, and a whole cube apart from its first cube,
 			// so a grid finer than the cube does not leave overlaps or slivers along the line
 			cell.from[stroke.axis] = stroke.layer;
 			for (let i = 0; i < 3; i++) {
-				if (i !== stroke.axis) cell.from[i] = stroke.start[i] + Math.round((cell.from[i] - stroke.start[i]) / size) * size;
+				if (i !== stroke.axis) cell.from[i] = stroke.start[i] + Math.round((cell.from[i] - stroke.start[i]) / size[i]) * size[i];
 			}
 			if (cell.from.every((v, i) => v === stroke.last[i])) return;
 			for (const from of cellsBetween(stroke.last, cell.from, size, stroke.axis)) {
-				const cube = makeCube({ from, to: from.map(v => v + size) }, stroke.source, stroke.face);
+				const cube = makeCube({ from, to: from.map((v, i) => v + size[i]) }, stroke.source, stroke.face);
 				if (cube) stroke.cubes.push(cube);
 			}
 			stroke.last = cell.from.slice();
@@ -3106,6 +3147,8 @@
 			const vue = panel.vue;
 			vue.mode = settings.mode;
 			vue.size = Number(settings.size) || 16;
+			vue.separate = !!settings.separate;
+			vue.axes = { width: Number(settings.width) || 16, height: Number(settings.height) || 16, depth: Number(settings.depth) || 16 };
 			vue.grid = String(settings.grid);
 			vue.names = { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name };
 			vue.inflate = settings.cutout_inflate;
@@ -3135,6 +3178,9 @@
 							sizes: SIZES,
 							mode: settings.mode,
 							size: Number(settings.size) || 16,
+							separate: !!settings.separate,
+							axes: { width: Number(settings.width) || 16, height: Number(settings.height) || 16, depth: Number(settings.depth) || 16 },
+							axisRows: [{ key: 'width', name: 'Width', axis: 'X' }, { key: 'height', name: 'Height', axis: 'Y' }, { key: 'depth', name: 'Depth', axis: 'Z' }],
 							grid: String(settings.grid),
 							names: { add: settings.add_name, cutout: settings.cutout_name, hollow: settings.hollow_name },
 							inflate: settings.cutout_inflate,
@@ -3149,6 +3195,8 @@
 					methods: {
 						setMode(mode) { setMode(mode); },
 						setSize(size) { setSize(size); },
+						setAxisSize(key, size) { setAxisSize(key, size); },
+						setSeparate(on) { setSeparate(on); },
 						setGrid(value) { setGrid(value); },
 						setName(mode, value) {
 							settings[mode + '_name'] = String(value || DEFAULTS[mode + '_name']).toUpperCase().trim() || DEFAULTS[mode + '_name'];
@@ -3185,9 +3233,22 @@
 							<p class="bgc_hint" v-if="x_toggles">Press X to switch between Add and Cut out.</p>
 
 							<label>Cube size <span class="bgc_subtle">in model units, 16 is one block</span></label>
-							<div class="bgc_buttons">
+							<div class="bgc_buttons" v-if="!separate">
 								<div v-for="s in sizes" :key="s" class="bgc_button bgc_size" :class="{selected: size === s}" @click="setSize(s)">{{ s }}</div>
 								<input type="number" class="bgc_custom" :class="{selected: custom_size}" min="1" max="256" :value="size" @change="setSize($event.target.value)" title="Any other size">
+							</div>
+							<template v-else>
+								<div class="bgc_axis" v-for="r in axisRows" :key="r.key">
+									<span class="bgc_axis_name">{{ r.name }} <span class="bgc_subtle">{{ r.axis }}</span></span>
+									<div class="bgc_buttons">
+										<div v-for="s in sizes" :key="r.key + s" class="bgc_button bgc_size" :class="{selected: axes[r.key] === s}" @click="setAxisSize(r.key, s)">{{ s }}</div>
+										<input type="number" class="bgc_custom" :class="{selected: !sizes.includes(axes[r.key])}" min="1" max="256" :value="axes[r.key]" @change="setAxisSize(r.key, $event.target.value)" :title="'Any other ' + r.name.toLowerCase()">
+									</div>
+								</div>
+							</template>
+							<div class="bgc_row" title="Set the cube's width (x), height (y) and depth (z) one by one, along the model's axes">
+								<input type="checkbox" :checked="separate" @change="setSeparate($event.target.checked)">
+								<span>Width, height and depth separately</span>
 							</div>
 
 							<label>Grid <span class="bgc_subtle">where cubes may sit, in model units</span></label>
@@ -3273,6 +3334,8 @@
 					.bgc_button.selected { background-color: var(--color-accent); color: var(--color-accent_text); }
 					.bgc_size { min-width: 28px; justify-content: center; }
 					.bgc_custom { width: 64px; }
+					.bgc_axis { margin: 2px 0 6px; }
+					.bgc_axis_name { display: block; margin-bottom: 2px; }
 					.bgc_custom.selected { outline: 2px solid var(--color-accent); }
 					.bgc_row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
 					.bgc_row input[type=text] { flex: 1; min-width: 0; }
@@ -4838,7 +4901,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.8.0',
+		version: '1.9.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

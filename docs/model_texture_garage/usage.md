@@ -211,7 +211,7 @@ Hold the mouse and drag to draw a line of cubes. The stroke stays on the layer o
 While the tool is in hand, its panel shows on the right with everything you need while placing:
 
 - `Mode`: Add, Cut out or Hollow. Press X to switch between Add and Cut out; Hollow is picked by hand. X only does this while the tool is in hand, and does its usual job (the Vertex Snap tool) otherwise. The switch at the bottom of the panel turns it off.
-- `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them.
+- `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them. Tick `Width, height and depth separately` to set the cube's width (along x), height (along y) and depth (along z) one by one, for slabs, beams or walls. Picking a single size again, here or in the tool bar, goes back to cubes of one size.
 - `Grid`: where cubes may sit, in model units: `Cube size` (the default, a grid as big as the cube) or 4, 8, 16, 32 or 64, on the model's block grid. A finer grid than the cube lets you place, say, 16 cubes in 4-unit steps; a coarser one keeps small cubes to the corners of bigger cells.
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
@@ -229,7 +229,7 @@ BlockPatcher (below) turns these cubes into real geometry. A build script of you
 
 ### Cube size and grid
 
-With `Grid` on `Cube size`, cubes snap to a grid of their own size laid over the model's block grid, so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face.
+With `Grid` on `Cube size`, cubes snap to a grid of their own size laid over the model's block grid (with separate sizes, each axis snaps to its own size), so a 16 cube always fills exactly one block, a 32 cube two blocks on each side, and an 8 cube a quarter of a block's face.
 
 Pick another `Grid` to snap to a different step. Across the face, the cube is centred on the cursor as near as the grid allows. In depth, an added cube starts at the grid line nearest the face, so on a fine grid it stacks flush on faces that are not on a block edge. Cut out and Hollow cubes always start at the face itself. A line drawn by dragging keeps its cubes a whole cube apart, starting from the first one, so a fine grid never leaves overlaps along the line. On formats with a centred grid, such as Bedrock entities, blocks span -8 to 8 on the x and z axes, and the grid follows that.
 
