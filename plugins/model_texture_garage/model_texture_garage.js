@@ -2833,13 +2833,31 @@
 			return out;
 		}
 
+		/**
+		 * The size one Ctrl + wheel step away: the next power of two up or down
+		 * (8 -> 16, 24 -> 32 going up, 24 -> 16 going down), between 1 and 256.
+		 * For separate sizes ([x, y, z]) every axis doubles or halves, keeping the
+		 * box's proportions; null when that would leave 1 to 256.
+		 */
+		function steppedSize(size, up) {
+			if (Array.isArray(size)) {
+				const next = size.map(v => up ? v * 2 : v / 2);
+				return next.every(v => v >= 1 && v <= 256 && Number.isInteger(v)) ? next : null;
+			}
+			let p = 1;
+			if (up) { while (p <= size) p *= 2; }
+			else { while (p * 2 < size) p *= 2; if (p >= size) p = size / 2; }
+			p = Math.max(1, Math.min(256, Math.round(p)));
+			return p === size ? null : p;
+		}
+
 		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
 		function toggledMode(mode) {
 			return mode === 'add' ? 'cutout' : 'add';
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -3134,6 +3152,43 @@
 			Blockbench.showQuickMessage(MODES[settings.mode].name, 700);
 		}
 
+		/* --- Ctrl + mouse wheel: size --- */
+
+		let wheelBuffer = 0, wheelTime = 0;
+		/**
+		 * Ctrl (or Cmd) + mouse wheel over the 3D view changes the cube size while
+		 * the tool is in hand: up doubles it, down halves it. Caught before
+		 * Blockbench sees it; with any other tool the wheel does what it always does.
+		 */
+		function onWheel(event) {
+			if (!tool || Toolbox.selected !== tool || !(event.ctrlKey || event.metaKey)) return;
+			const t = event.target;
+			if (!t || t.tagName !== 'CANVAS' || !t.closest || !t.closest('.preview')) return;
+			event.preventDefault();
+			event.stopImmediatePropagation();
+			// a trackpad sends many small steps: add them up, one size step per notch
+			wheelBuffer += event.deltaY;
+			const now = Date.now();
+			if (Math.abs(wheelBuffer) < 40 || now - wheelTime < 90) return;
+			const up = wheelBuffer < 0;
+			wheelBuffer = 0; wheelTime = now;
+			if (settings.separate) {
+				const next = steppedSize(cubeSize(), up);
+				if (!next) { Blockbench.showQuickMessage(up ? 'As big as it goes' : 'As small as it goes', 700); return; }
+				settings.width = next[0]; settings.height = next[1]; settings.depth = next[2];
+				saveSettings();
+				clearPreview();
+				if (lastHover) showPreview(lastHover);
+				syncPanel();
+				Blockbench.showQuickMessage(next.join(' × '), 700);
+			} else {
+				const next = steppedSize(Number(settings.size) || 16, up);
+				if (!next) { Blockbench.showQuickMessage(up ? 'As big as it goes' : 'As small as it goes', 700); return; }
+				setSize(next);
+				Blockbench.showQuickMessage(String(next), 700);
+			}
+		}
+
 		/* --- panel --- */
 
 		function countByName() {
@@ -3231,6 +3286,7 @@
 								</div>
 							</div>
 							<p class="bgc_hint" v-if="x_toggles">Press X to switch between Add and Cut out.</p>
+							<p class="bgc_hint">Ctrl + mouse wheel makes the cube bigger or smaller.</p>
 
 							<label>Cube size <span class="bgc_subtle">in model units, 16 is one block</span></label>
 							<div class="bgc_buttons" v-if="!separate">
@@ -3367,7 +3423,7 @@
 
 				tool = new Tool('block_grid_cube', {
 					name: 'Block Grid Cube',
-					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out',
+					description: 'Click a face to add a cube on the block grid, cut one out or mark one hollow. X switches between Add and Cut out, Ctrl + mouse wheel changes the size',
 					icon: 'view_in_ar',
 					category: 'tools',
 					toolbar: 'block_grid_cube',
@@ -3404,6 +3460,7 @@
 
 				createPanel();
 				window.addEventListener('keydown', onKeyDown, true);
+				window.addEventListener('wheel', onWheel, { capture: true, passive: false });
 				for (const event of ['finished_edit', 'undo', 'redo', 'select_project']) {
 					listeners.push(Blockbench.on(event, syncPanel));
 				}
@@ -3417,6 +3474,7 @@
 			},
 			onunload() {
 				window.removeEventListener('keydown', onKeyDown, true);
+				window.removeEventListener('wheel', onWheel, { capture: true });
 				window.removeEventListener('mouseup', endStroke, true);
 				stroke = null;
 				listeners.forEach(l => l && l.delete && l.delete());
@@ -4901,7 +4959,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.9.0',
+		version: '1.10.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {

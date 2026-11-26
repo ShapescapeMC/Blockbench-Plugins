@@ -212,6 +212,7 @@ While the tool is in hand, its panel shows on the right with everything you need
 
 - `Mode`: Add, Cut out or Hollow. Press X to switch between Add and Cut out; Hollow is picked by hand. X only does this while the tool is in hand, and does its usual job (the Vertex Snap tool) otherwise. The switch at the bottom of the panel turns it off.
 - `Cube size`: 4, 8, 16 (one block), 32 or 64 units, or any other size typed into the box next to them. Tick `Width, height and depth separately` to set the cube's width (along x), height (along y) and depth (along z) one by one, for slabs, beams or walls. Picking a single size again, here or in the tool bar, goes back to cubes of one size.
+- `Ctrl` + mouse wheel over the model (`Cmd` on a Mac) makes the cube bigger or smaller while the tool is in hand: each step doubles or halves it (16, 32, 64, ...; 24 goes to 32 or 16). With separate sizes, width, height and depth all double or halve together, keeping the box's shape. Without `Ctrl`, the wheel zooms as usual.
 - `Grid`: where cubes may sit, in model units: `Cube size` (the default, a grid as big as the cube) or 4, 8, 16, 32 or 64, on the model's block grid. A finer grid than the cube lets you place, say, 16 cubes in 4-unit steps; a coarser one keeps small cubes to the corners of bigger cells.
 - `Names`: what each kind of cube is called, for your build script, with how many there are in the model. Names are always written in capitals.
 - `Inflate`: how much Cut out and Hollow cubes are inflated, 0.025 by default.
