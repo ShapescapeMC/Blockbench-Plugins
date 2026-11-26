@@ -2754,6 +2754,7 @@
 			cutout_inflate: 0.025,  // how much cut-out and hollow cubes are inflated
 			x_toggles: true,        // X switches between Add and Cut out while the tool is held
 			drag_draw: true,        // hold the mouse and drag to place a line of cubes
+			show_grid: true,        // grid lines on the model at the placing grid, while the tool is in hand
 			right_click_delete: true, // right-click (without dragging) deletes the cube under the cursor
 			overlay: 'always'       // coloured boxes on placed ADD / CUTOUT / HOLLOW cubes: 'always', 'tool' (while placing) or 'off'
 		};
@@ -2885,13 +2886,46 @@
 			return out;
 		}
 
+		/**
+		 * Grid lines on the faces of a box, in model units, as a flat list of
+		 * [x, y, z] pairs: lines every `step[axis]` units, on the block grid
+		 * shifted by `offset[axis]`, a little (`lift`) outside each face so they
+		 * don't flicker with it. At most `max` lines per face and direction.
+		 */
+		function boxGridLines(box, step, offset, lift, max = 256) {
+			const points = [];
+			for (let n = 0; n < 3; n++) {
+				for (const side of [-1, 1]) {
+					const depth = (side > 0 ? box.to[n] : box.from[n]) + side * lift;
+					for (const a of [0, 1, 2]) {
+						if (a === n) continue;
+						const b = 3 - n - a;
+						const st = step[a];
+						if (!(st > 0)) continue;
+						let p = Math.floor((box.from[a] - offset[a]) / st) * st + offset[a];
+						let count = 0;
+						for (; p < box.to[a] - 1e-6 && count < max; p += st) {
+							if (p <= box.from[a] + 1e-6) continue;
+							const p1 = [0, 0, 0], p2 = [0, 0, 0];
+							p1[a] = p2[a] = p;
+							p1[b] = box.from[b]; p2[b] = box.to[b];
+							p1[n] = p2[n] = depth;
+							points.push(p1, p2);
+							count++;
+						}
+					}
+				}
+			}
+			return points;
+		}
+
 		/** The next mode for the X key: Add and Cut out swap; Hollow goes to Add. */
 		function toggledMode(mode) {
 			return mode === 'add' ? 'cutout' : 'add';
 		}
 
 		if (typeof module !== 'undefined' && module.exports) {
-			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, modeOfName, stackOut, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
+			Object.assign(module.exports, { targetCell, gridOffset, toggledMode, cellsBetween, steppedSize, modeOfName, stackOut, boxGridLines, FACE_NORMALS, MODELER_DEFAULTS: DEFAULTS });
 		}
 		if (typeof Plugin === 'undefined') return;
 
@@ -3015,6 +3049,7 @@
 			if (gridSelect && gridSelect.value !== String(settings.grid)) gridSelect.set(String(settings.grid));
 			clearPreview();
 			if (lastHover) showPreview(lastHover);
+			queueOverlay();
 			syncPanel();
 		}
 
@@ -3038,6 +3073,7 @@
 			if (sizeSelect && SIZES.includes(v)) sizeSelect.set(String(v));
 			clearPreview();
 			if (lastHover) showPreview(lastHover);
+			queueOverlay();
 			syncPanel();
 		}
 
@@ -3128,6 +3164,7 @@
 			saveSettings();
 			clearPreview();
 			if (lastHover) showPreview(lastHover);
+			queueOverlay();
 			syncPanel();
 		}
 
@@ -3140,6 +3177,7 @@
 			saveSettings();
 			clearPreview();
 			if (lastHover) showPreview(lastHover);
+			queueOverlay();
 			syncPanel();
 		}
 
@@ -3277,6 +3315,7 @@
 		 */
 		function updateOverlay() {
 			clearOverlay();
+			drawBlockGrid();
 			if (!overlayWanted()) return;
 			const names = { add: nameFor('add'), cutout: nameFor('cutout'), hollow: nameFor('hollow') };
 			for (const cube of Cube.all) {
@@ -3302,6 +3341,38 @@
 				overlays.push(group);
 			}
 		}
+		/* the block grid on the model, while the tool is in hand */
+		const gridLinesObjects = [];
+		let gridMaterial = null;
+		function clearBlockGrid() {
+			for (const o of gridLinesObjects) { if (o.parent) o.parent.remove(o); o.geometry.dispose(); }
+			gridLinesObjects.length = 0;
+		}
+		function drawBlockGrid() {
+			clearBlockGrid();
+			if (!settings.show_grid || !tool || Toolbox.selected !== tool || typeof Project === 'undefined' || !Project || !Modes.edit) return;
+			if (!gridMaterial) gridMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35, depthWrite: false });
+			const centred = typeof Format !== 'undefined' && !!Format.centered_grid;
+			const step = gridStep(), offset = gridOffset(centred);
+			const names = { add: nameFor('add'), cutout: nameFor('cutout'), hollow: nameFor('hollow') };
+			for (const cube of Cube.all) {
+				if (!cube.mesh || cube.visibility === false || modeOfName(cube.name, names)) continue;
+				const lift = (Number(cube.inflate) || 0) + 0.02;
+				const pts = boxGridLines(cube, step, offset, lift);
+				if (!pts.length) continue;
+				const arr = new Float32Array(pts.length * 3);
+				pts.forEach((p, i) => { arr[i * 3] = p[0] - cube.origin[0]; arr[i * 3 + 1] = p[1] - cube.origin[1]; arr[i * 3 + 2] = p[2] - cube.origin[2]; });
+				const geo = new THREE.BufferGeometry();
+				geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+				const lines = new THREE.LineSegments(geo, gridMaterial);
+				lines.name = 'block_grid_modeler_grid';
+				lines.renderOrder = 5;
+				lines.raycast = () => {};
+				cube.mesh.add(lines);
+				gridLinesObjects.push(lines);
+			}
+		}
+
 		let overlayQueued = false;
 		function queueOverlay() {
 			if (overlayQueued) return;
@@ -3394,6 +3465,7 @@
 				clearPreview();
 				if (lastHover) showPreview(lastHover);
 				syncPanel();
+				queueOverlay();
 				Blockbench.showQuickMessage(next.join(' × '), 700);
 			} else {
 				const next = steppedSize(Number(settings.size) || 16, up);
@@ -3425,6 +3497,7 @@
 			vue.drag_draw = settings.drag_draw;
 			vue.overlay = settings.overlay || 'always';
 			vue.right_click_delete = settings.right_click_delete !== false;
+			vue.show_grid = !!settings.show_grid;
 			try { vue.counts = countByName(); } catch (e) {}
 		}
 
@@ -3459,6 +3532,7 @@
 							drag_draw: settings.drag_draw,
 							overlay: settings.overlay || 'always',
 							right_click_delete: settings.right_click_delete !== false,
+							show_grid: !!settings.show_grid,
 							counts: { add: 0, cutout: 0, hollow: 0 }
 						};
 					},
@@ -3471,6 +3545,7 @@
 						setAxisSize(key, size) { setAxisSize(key, size); },
 						setSeparate(on) { setSeparate(on); },
 						setOverlay(value) { setOverlay(value); },
+						setShowGrid(value) { settings.show_grid = !!value; saveSettings(); queueOverlay(); syncPanel(); },
 						setRightDelete(value) { settings.right_click_delete = !!value; saveSettings(); syncPanel(); },
 						setGrid(value) { setGrid(value); },
 						setName(mode, value) {
@@ -3531,6 +3606,11 @@
 							<div class="bgc_buttons">
 								<div class="bgc_button" :class="{selected: grid === 'size'}" @click="setGrid('size')" title="Snap to a grid as big as the cube">Cube size</div>
 								<div v-for="s in sizes" :key="'g' + s" class="bgc_button bgc_size" :class="{selected: grid === String(s)}" @click="setGrid(s)">{{ s }}</div>
+							</div>
+
+							<div class="bgc_row" title="Grid lines on the model at the grid you place on, while this tool is in hand">
+								<input type="checkbox" :checked="show_grid" @change="setShowGrid($event.target.checked)">
+								<span>Show block grid</span>
 							</div>
 
 							<label>Names <span class="bgc_subtle">for your build script, always in capitals</span></label>
@@ -3723,6 +3803,8 @@
 				listeners.length = 0;
 				clearPreview();
 				clearOverlay();
+				clearBlockGrid();
+				if (gridMaterial) gridMaterial.dispose();
 				for (const key in previewMaterials) previewMaterials[key].dispose();
 				for (const key in overlayMaterials) overlayMaterials[key].dispose();
 				if (panel) panel.delete();
@@ -5454,7 +5536,7 @@
 		author: 'Shapescape',
 		description: 'Brushes for pixel art edges, highlights, shadows, noise and block cells, a colour reference panel, and a tool to add and cut out cubes on the block grid.',
 		icon: 'garage',
-		version: '1.13.0',
+		version: '1.14.0',
 		min_version: '5.0.0',
 		variant: 'both',
 		onload() {
